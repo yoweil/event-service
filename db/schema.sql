@@ -51,6 +51,7 @@ CREATE TABLE public.events (
     CONSTRAINT events_created_by_id_check CHECK (btrim(created_by_id) <> '')
 );
 
+CREATE INDEX events_started_idx ON public.events (started_at DESC, id DESC);
 CREATE INDEX events_well_started_idx ON public.events (well_id, started_at DESC, id DESC);
 CREATE INDEX events_type_started_idx ON public.events (event_type_id, started_at DESC, id DESC);
 

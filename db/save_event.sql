@@ -1,27 +1,34 @@
 BEGIN;
 
-CREATE TYPE public.event_field_edit AS (
-    field_key text,
-    value_text text,
-    value_number numeric,
-    value_boolean boolean,
-    value_date date,
-    value_datetime timestamptz,
-    value_option text
-);
+DO $$
+BEGIN
+    IF to_regtype('public.event_field_edit') IS NULL THEN
+        CREATE TYPE public.event_field_edit AS (
+            field_key text,
+            value_text text,
+            value_number numeric,
+            value_boolean boolean,
+            value_date date,
+            value_datetime timestamptz,
+            value_option text
+        );
+    END IF;
+    IF to_regtype('public.event_property_change') IS NULL THEN
+        CREATE TYPE public.event_property_change AS (
+            base_key text, field_key text, old_value text, new_value text
+        );
+    END IF;
+END;
+$$;
 
-CREATE TYPE public.event_property_change AS (
-    base_key text, field_key text, old_value text, new_value text
-);
-
-CREATE FUNCTION public.event_audit_time(moment timestamptz)
+CREATE OR REPLACE FUNCTION public.event_audit_time(moment timestamptz)
 RETURNS text LANGUAGE sql STABLE STRICT
 SET timezone = 'UTC' SET datestyle = 'ISO, YMD'
 AS $$
     SELECT regexp_replace(moment::text, '^([^ ]+) ([^ ]+)[+]00( BC)?$', '\1T\2Z\3');
 $$;
 
-CREATE FUNCTION public.event_audit_value(v public.event_field_values)
+CREATE OR REPLACE FUNCTION public.event_audit_value(v public.event_field_values)
 RETURNS text LANGUAGE sql STABLE
 SET datestyle = 'ISO, YMD'
 AS $$
@@ -29,7 +36,7 @@ AS $$
                     v.value_date::text, public.event_audit_time(v.value_datetime), v.value_option);
 $$;
 
-CREATE FUNCTION public.save_event(
+CREATE OR REPLACE FUNCTION public.save_event(
     p_type_id bigint, p_well_id text, p_status text, p_time_kind text,
     p_started_at timestamptz, p_ended_at timestamptz, p_description text,
     p_actor_kind text, p_actor_id text, p_fields public.event_field_edit[] DEFAULT '{}',
@@ -96,8 +103,11 @@ BEGIN
     );
 
     FOREACH edit IN ARRAY p_fields LOOP
-        SELECT * INTO STRICT definition FROM public.event_type_fields
+        SELECT * INTO definition FROM public.event_type_fields
         WHERE event_type_id = p_type_id AND field_key = edit.field_key;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Unknown field % for this event type', edit.field_key USING ERRCODE = '22023';
+        END IF;
         SELECT * INTO previous_value FROM public.event_field_values
         WHERE event_id = card.id AND field_key = edit.field_key;
 
@@ -157,9 +167,9 @@ BEGIN
         WHERE id = p_event_id RETURNING * INTO card;
     END IF;
 
-    INSERT INTO public.event_changes (event_id, revision, operation, actor_kind, actor_id)
+    INSERT INTO public.event_changes (event_id, revision, operation, actor_kind, actor_id, changed_at)
     VALUES (card.id, card.revision, CASE WHEN p_event_id IS NULL THEN 'created' ELSE 'updated' END,
-            p_actor_kind, p_actor_id);
+            p_actor_kind, p_actor_id, card.updated_at);
     INSERT INTO public.event_change_items (event_id, revision, event_type_id, base_key, field_key, old_value, new_value)
     SELECT card.id, card.revision, p_type_id, d.base_key, d.field_key, d.old_value, d.new_value
     FROM unnest(changes) AS d;

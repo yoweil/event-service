@@ -4,6 +4,17 @@ BEGIN;
 SELECT id FROM public.create_event_type('test_basic', 'Общее событие', 'user', 'anna');
 
 DO $$
+BEGIN
+    UPDATE event_types SET name = 'Новое название', is_archived = true WHERE code = 'test_basic';
+    BEGIN
+        UPDATE event_types SET code = 'renamed_basic' WHERE code = 'test_basic';
+        RAISE EXCEPTION 'Renamed a permanent type code';
+    EXCEPTION WHEN check_violation THEN NULL;
+    END;
+END;
+$$;
+
+DO $$
 DECLARE
     research public.event_types;
     shutdown public.event_types;

@@ -42,8 +42,20 @@ BEGIN
           AND base_key='description' AND old_value='' AND new_value='Готово'
     ) THEN RAISE EXCEPTION 'Missing change history'; END IF;
 
+    IF (SELECT changed_at FROM event_changes WHERE event_id=card.id AND revision=2)
+       IS DISTINCT FROM saved.updated_at THEN
+        RAISE EXCEPTION 'History and card timestamps differ for the same revision';
+    END IF;
+
     SELECT * INTO STRICT saved FROM pg_temp.save_card('ready', ARRAY[zero_pressure], card.id, 2, 'Готово');
     IF saved.revision <> 2 THEN RAISE EXCEPTION 'Identical save changed revision'; END IF;
+    BEGIN
+        PERFORM pg_temp.save_card('draft', ARRAY[
+            ROW('missing_key',NULL,1,NULL,NULL,NULL,NULL)::public.event_field_edit
+        ], card.id, 2);
+        RAISE EXCEPTION 'Unknown field accepted';
+    EXCEPTION WHEN invalid_parameter_value THEN NULL;
+    END;
     BEGIN
         PERFORM pg_temp.save_card('draft', ARRAY[clear_pressure], card.id, 1);
         RAISE EXCEPTION 'Stale edit accepted';

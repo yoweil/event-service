@@ -1,27 +1,45 @@
 BEGIN;
 
-CREATE TYPE public.event_field_definition AS (
-    field_key text,
-    label text,
-    data_type text,
-    is_required boolean,
-    description text,
-    unit_code text,
-    min_number numeric,
-    max_number numeric,
-    min_length integer,
-    max_length integer,
-    sort_order integer
-);
+DO $$
+BEGIN
+    IF to_regtype('public.event_field_definition') IS NULL THEN
+        CREATE TYPE public.event_field_definition AS (
+            field_key text,
+            label text,
+            data_type text,
+            is_required boolean,
+            description text,
+            unit_code text,
+            min_number numeric,
+            max_number numeric,
+            min_length integer,
+            max_length integer,
+            sort_order integer
+        );
+    END IF;
+    IF to_regtype('public.event_option_definition') IS NULL THEN
+        CREATE TYPE public.event_option_definition AS (
+            field_key text,
+            code text,
+            label text,
+            sort_order integer
+        );
+    END IF;
+END;
+$$;
 
-CREATE TYPE public.event_option_definition AS (
-    field_key text,
-    code text,
-    label text,
-    sort_order integer
-);
+CREATE OR REPLACE FUNCTION public.protect_event_type_code() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'Event type code cannot be changed' USING ERRCODE = 'check_violation';
+END;
+$$;
 
-CREATE FUNCTION public.create_event_type(
+CREATE OR REPLACE TRIGGER protect_event_type_code
+BEFORE UPDATE OF code ON public.event_types
+FOR EACH ROW WHEN (OLD.code IS DISTINCT FROM NEW.code)
+EXECUTE FUNCTION public.protect_event_type_code();
+
+CREATE OR REPLACE FUNCTION public.create_event_type(
     p_code text, p_name text, p_actor_kind text, p_actor_id text,
     p_description text DEFAULT NULL,
     p_fields public.event_field_definition[] DEFAULT '{}',

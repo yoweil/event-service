@@ -164,6 +164,7 @@ CREATE TABLE public.event_change_items (
     field_key text,
     old_value text,
     new_value text,
+    option_field_key text,
 
     CHECK (num_nonnulls(base_key, field_key) = 1),
     CHECK (old_value IS DISTINCT FROM new_value),
@@ -174,10 +175,38 @@ CREATE TABLE public.event_change_items (
     FOREIGN KEY (event_id, event_type_id)
         REFERENCES public.events (id, event_type_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     FOREIGN KEY (event_type_id, field_key)
-        REFERENCES public.event_type_fields (event_type_id, field_key) ON UPDATE RESTRICT ON DELETE RESTRICT
+        REFERENCES public.event_type_fields (event_type_id, field_key) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    FOREIGN KEY (event_type_id, option_field_key, old_value)
+        REFERENCES public.event_field_options (event_type_id, field_key, code) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    FOREIGN KEY (event_type_id, option_field_key, new_value)
+        REFERENCES public.event_field_options (event_type_id, field_key, code) ON UPDATE RESTRICT ON DELETE RESTRICT
 );
+
+CREATE FUNCTION public.set_audit_option_field() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    NEW.option_field_key := NULL;
+    IF NEW.field_key IS NOT NULL THEN
+        SELECT CASE WHEN f.data_type = 'select' THEN f.field_key END
+          INTO NEW.option_field_key
+          FROM public.event_type_fields f
+         WHERE (f.event_type_id, f.field_key) = (NEW.event_type_id, NEW.field_key)
+           FOR KEY SHARE;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Unknown event field % for event type %', NEW.field_key, NEW.event_type_id
+                USING ERRCODE = 'foreign_key_violation';
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER set_audit_option_field
+BEFORE INSERT OR UPDATE ON public.event_change_items
+FOR EACH ROW EXECUTE FUNCTION public.set_audit_option_field();
 
 CREATE INDEX event_change_items_by_field ON public.event_change_items (event_type_id, field_key)
     WHERE field_key IS NOT NULL;
+CREATE INDEX event_change_items_by_option_field ON public.event_change_items (event_type_id, option_field_key)
+    WHERE option_field_key IS NOT NULL;
 
 COMMIT;

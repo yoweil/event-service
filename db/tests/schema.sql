@@ -154,6 +154,27 @@ SELECT pg_temp.assert_true((SELECT o.label='Ремонт' AND o.is_archived
   FROM event_field_options o JOIN event_field_values v
     ON (v.event_type_id,v.field_key,v.value_option)=(o.event_type_id,o.field_key,o.code)
   WHERE v.event_id=:stop_card AND v.field_key='reason'), 'archived option is readable');
+
+INSERT INTO event_field_options (event_type_id, field_key, code, label) VALUES
+  (:shutdown, 'reason', 'inspection', 'Осмотр'),
+  (:shutdown, 'reason', 'unused', 'Не выбирали');
+DELETE FROM event_field_values WHERE event_id=:stop_card AND field_key='reason';
+INSERT INTO event_changes (event_id, revision, operation, actor_kind, actor_id)
+VALUES (:stop_card, 2, 'updated', 'user', 'alice');
+INSERT INTO event_change_items (event_id, revision, event_type_id, field_key, old_value, new_value)
+VALUES (:stop_card, 2, :shutdown, 'reason', 'repair', 'inspection');
+SELECT pg_temp.expect_error(format(
+  'DELETE FROM event_field_options WHERE event_type_id=%s AND field_key=%L AND code=%L',
+  :shutdown,'reason',code), '23001','option referenced only by audit: ' || code)
+FROM (VALUES ('repair'), ('inspection')) AS used(code);
+SELECT pg_temp.expect_error(format(
+  'UPDATE event_field_options SET code=%L WHERE event_type_id=%s AND field_key=%L AND code=%L',
+  'renamed',:shutdown,'reason','repair'), '23001','historical option code is stable');
+SELECT pg_temp.expect_error(format(
+  'UPDATE event_change_items SET new_value=%L WHERE event_id=%s AND revision=2 AND field_key=%L',
+  'control',:stop_card,'reason'), '23503','audit rejects option from another type');
+DELETE FROM event_field_options WHERE event_type_id=:shutdown AND field_key='reason' AND code='unused';
+
 DELETE FROM event_field_values WHERE event_id=:card AND field_key='pressure';
 UPDATE events SET revision=3 WHERE id=:card AND revision=2;
 INSERT INTO event_changes (event_id,revision,operation,actor_kind,actor_id)

@@ -16,6 +16,9 @@ Thumbs.db
 # Временные файлы
 *.log
 tmp/
+web/node_modules/
+web/dist/
+web/vendor/
 
 # Исходное описание заказчика не публикуется
 /docs/Описание_сервиса_событи*.pdf

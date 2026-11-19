@@ -1,11 +1,9 @@
-# Локальная конфигурация и секреты
 .env
 .env.*
 !.env.example
 *.pem
 *.key
 
-# Локальные файлы редакторов и ОС
 .idea/
 .vscode/
 .DS_Store
@@ -13,12 +11,10 @@ Thumbs.db
 *.swp
 *.swo
 
-# Временные файлы
 *.log
 tmp/
 web/node_modules/
 web/dist/
 web/vendor/
 
-# Исходное описание заказчика не публикуется
 /docs/Описание_сервиса_событи*.pdf

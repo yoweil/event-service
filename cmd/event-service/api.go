@@ -28,12 +28,20 @@ func newHandler(db queryer, token, actor string, requestTimeout time.Duration) h
 	mux.HandleFunc("GET /event-types", a.listTypes)
 	mux.HandleFunc("POST /event-types", a.createType)
 	mux.HandleFunc("GET /event-types/{id}", a.getType)
+	mux.HandleFunc("PATCH /event-types/{id}", a.editType)
 	mux.HandleFunc("POST /events", a.saveEvent)
 	mux.HandleFunc("GET /events", a.listEvents)
 	mux.HandleFunc("PUT /events/{id}", a.saveEvent)
 	mux.HandleFunc("GET /events/{id}", a.getEvent)
+	mux.HandleFunc("GET /events/{id}/attachments", a.listAttachments)
+	mux.HandleFunc("POST /events/{id}/attachments", a.uploadAttachment)
+	mux.HandleFunc("GET /events/{id}/attachments/{attachment}", a.downloadAttachment)
+	mux.HandleFunc("POST /events/{id}/attachments/{attachment}/results", a.recordAttachmentResult)
+	mux.HandleFunc("/events/{id}/attachments/{attachment}/results", methodNotAllowed("POST"))
+	mux.HandleFunc("/events/{id}/attachments", methodNotAllowed("GET, HEAD, POST"))
+	mux.HandleFunc("/events/{id}/attachments/{attachment}", methodNotAllowed("GET, HEAD"))
 	mux.HandleFunc("/event-types", methodNotAllowed("GET, HEAD, POST"))
-	mux.HandleFunc("/event-types/{id}", methodNotAllowed("GET, HEAD"))
+	mux.HandleFunc("/event-types/{id}", methodNotAllowed("GET, HEAD, PATCH"))
 	mux.HandleFunc("/events", methodNotAllowed("GET, HEAD, POST"))
 	mux.HandleFunc("/events/{id}", methodNotAllowed("GET, HEAD, PUT"))
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
@@ -108,6 +116,9 @@ func databaseError(w http.ResponseWriter, err error) {
 			return
 		case "EV409":
 			respondError(w, http.StatusConflict, "event revision has changed")
+			return
+		case "ET409":
+			respondError(w, http.StatusConflict, "event type has changed")
 			return
 		case "23505":
 			respondError(w, http.StatusConflict, "duplicate code or field key")
@@ -208,6 +219,31 @@ func (a *api) createType(w http.ResponseWriter, r *http.Request) {
 	respond(w, http.StatusCreated, result)
 }
 
+func (a *api) editType(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r, "event type")
+	if !ok {
+		return
+	}
+	var input editTypeInput
+	if !readBody(w, r, &input) {
+		return
+	}
+	if input.ExpectedUpdatedAt == nil || (input.Name != nil && strings.TrimSpace(*input.Name) == "") {
+		respondError(w, http.StatusBadRequest, "expected_updated_at is required and name cannot be blank")
+		return
+	}
+	if input.Name == nil && input.Description == nil && len(input.Fields)+len(input.Options)+len(input.ArchiveKeys) == 0 {
+		respondError(w, http.StatusBadRequest, "no changes supplied")
+		return
+	}
+	result, err := a.applyTypeEdit(r.Context(), id, input)
+	if err != nil {
+		databaseError(w, err)
+		return
+	}
+	respond(w, http.StatusOK, result)
+}
+
 func (a *api) saveEvent(w http.ResponseWriter, r *http.Request) {
 	var input saveInput
 	if !readBody(w, r, &input) {
@@ -226,8 +262,8 @@ func (a *api) saveEvent(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusBadRequest, "update requires expected_revision and description")
 			return
 		}
-	} else if input.ExpectedRevision != nil {
-		respondError(w, http.StatusBadRequest, "expected_revision applies only to updates")
+	} else if input.ExpectedRevision != nil || input.SourceNotificationID != nil {
+		respondError(w, http.StatusBadRequest, "expected_revision and source_notification_id apply only to updates")
 		return
 	}
 	if input.TypeID < 1 || strings.TrimSpace(input.WellID) == "" || input.Start == nil || input.TimeKind == "" || input.Status == "" {

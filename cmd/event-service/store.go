@@ -7,6 +7,8 @@ import (
 	"errors"
 	"regexp"
 	"time"
+
+	"github.com/lib/pq"
 )
 
 type queryer interface {
@@ -83,15 +85,16 @@ type fieldEdit struct {
 }
 
 type saveInput struct {
-	TypeID           int64       `json:"event_type_id"`
-	WellID           string      `json:"well_id"`
-	Status           string      `json:"status"`
-	TimeKind         string      `json:"time_kind"`
-	Start            *timestamp  `json:"started_at"`
-	End              *timestamp  `json:"ended_at"`
-	Description      *string     `json:"description"`
-	Fields           []fieldEdit `json:"fields"`
-	ExpectedRevision *int64      `json:"expected_revision"`
+	TypeID               int64       `json:"event_type_id"`
+	WellID               string      `json:"well_id"`
+	Status               string      `json:"status"`
+	TimeKind             string      `json:"time_kind"`
+	Start                *timestamp  `json:"started_at"`
+	End                  *timestamp  `json:"ended_at"`
+	Description          *string     `json:"description"`
+	Fields               []fieldEdit `json:"fields"`
+	ExpectedRevision     *int64      `json:"expected_revision"`
+	SourceNotificationID *string     `json:"source_notification_id"`
 }
 
 func arrayParam[T any](items []T) (string, error) {
@@ -137,7 +140,7 @@ func (a *api) readType(ctx context.Context, id int64, includeArchived bool) (jso
 			WHERE f.event_type_id = $1 AND ($2 OR NOT f.is_archived)
 		)
 		SELECT row_to_json(definition) FROM (
-			SELECT t.id, t.code, t.name, t.description, t.is_archived,
+			SELECT t.id, t.code, t.name, t.description, t.is_archived, t.updated_at,
 			       (SELECT coalesce(json_agg(f ORDER BY f.sort_order, f.field_key), '[]'::json)
 			        FROM fields AS f) AS fields
 			FROM public.event_types AS t WHERE t.id = $1
@@ -163,6 +166,34 @@ func (a *api) insertType(ctx context.Context, input createTypeInput) (eventTypeR
 	return result, err
 }
 
+type editTypeInput struct {
+	ExpectedUpdatedAt *timestamp         `json:"expected_updated_at"`
+	Name              *string            `json:"name"`
+	Description       *string            `json:"description"`
+	Fields            []fieldDefinition  `json:"add_fields"`
+	Options           []optionDefinition `json:"options"`
+	ArchiveKeys       []string           `json:"archive_fields"`
+}
+
+func (a *api) applyTypeEdit(ctx context.Context, id int64, input editTypeInput) (eventTypeRef, error) {
+	var result eventTypeRef
+	fields, err := arrayParam(input.Fields)
+	if err != nil {
+		return result, err
+	}
+	options, err := arrayParam(input.Options)
+	if err != nil {
+		return result, err
+	}
+	err = a.db.QueryRowContext(ctx, `
+		SELECT id, code, name FROM public.edit_event_type($1, $2, $3, $4,
+			ARRAY(SELECT f FROM json_populate_recordset(NULL::public.event_field_definition, $5::json) AS f),
+			ARRAY(SELECT o FROM json_populate_recordset(NULL::public.event_option_definition, $6::json) AS o),
+			$7::text[])`, id, input.ExpectedUpdatedAt, input.Name, input.Description, fields, options,
+		pq.Array(input.ArchiveKeys)).Scan(&result.ID, &result.Code, &result.Name)
+	return result, err
+}
+
 type eventRef struct {
 	ID       int64 `json:"id"`
 	Revision int64 `json:"revision"`
@@ -175,10 +206,10 @@ func (a *api) persistEvent(ctx context.Context, id *int64, input saveInput) (eve
 		return result, err
 	}
 	err = a.db.QueryRowContext(ctx, `
-        SELECT id, revision FROM public.save_event($1, $2, $3, $4, $5, $6, coalesce($7,''), 'service', $8,
-            ARRAY(SELECT f FROM json_populate_recordset(NULL::public.event_field_edit, $9::json) AS f), $10, $11)`,
+        SELECT id, revision FROM public.save_event_with_source($1, $2, $3, $4, $5, $6, coalesce($7,''), 'service', $8,
+            ARRAY(SELECT f FROM json_populate_recordset(NULL::public.event_field_edit, $9::json) AS f), $10, $11, $12)`,
 		input.TypeID, input.WellID, input.Status, input.TimeKind, input.Start, input.End, input.Description,
-		a.actor, fields, id, input.ExpectedRevision).Scan(&result.ID, &result.Revision)
+		a.actor, fields, id, input.ExpectedRevision, input.SourceNotificationID).Scan(&result.ID, &result.Revision)
 	return result, err
 }
 

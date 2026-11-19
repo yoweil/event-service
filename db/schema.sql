@@ -210,4 +210,100 @@ CREATE INDEX event_change_items_by_field ON public.event_change_items (event_typ
 CREATE INDEX event_change_items_by_option_field ON public.event_change_items (event_type_id, option_field_key)
     WHERE option_field_key IS NOT NULL;
 
+CREATE TABLE public.event_attachments (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    event_id bigint NOT NULL REFERENCES public.events(id) ON DELETE RESTRICT,
+    filename text NOT NULL CHECK (char_length(filename) BETWEEN 1 AND 255 AND btrim(filename) <> ''),
+    content bytea NOT NULL,
+    size_bytes integer GENERATED ALWAYS AS (octet_length(content)) STORED,
+    digest bytea GENERATED ALWAYS AS (sha256(content)) STORED,
+    uploaded_by_id text NOT NULL CHECK (btrim(uploaded_by_id) <> ''),
+    uploaded_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (event_id, filename, digest)
+);
+
+CREATE TABLE public.notification_outbox (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    attachment_id bigint NOT NULL UNIQUE REFERENCES public.event_attachments(id) ON DELETE RESTRICT,
+    attempts bigint NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    next_attempt_at timestamptz NOT NULL DEFAULT now(),
+    delivered_at timestamptz
+);
+
+CREATE INDEX notification_outbox_pending ON public.notification_outbox (next_attempt_at, id)
+    WHERE delivered_at IS NULL;
+
+CREATE FUNCTION public.notify_attachment_insert() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog, public AS $$
+BEGIN
+    INSERT INTO public.notification_outbox (attachment_id) VALUES (NEW.id);
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER notify_attachment_insert
+AFTER INSERT ON public.event_attachments
+FOR EACH ROW EXECUTE FUNCTION public.notify_attachment_insert();
+
+CREATE TABLE public.event_notification_outbox (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    event_id bigint NOT NULL,
+    revision bigint NOT NULL,
+    attempts bigint NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    next_attempt_at timestamptz NOT NULL DEFAULT now(),
+    delivered_at timestamptz,
+    UNIQUE (event_id, revision),
+    FOREIGN KEY (event_id, revision) REFERENCES public.event_changes (event_id, revision)
+);
+
+CREATE INDEX event_notification_pending ON public.event_notification_outbox (next_attempt_at, id)
+    WHERE delivered_at IS NULL;
+CREATE INDEX event_notification_pending_revision ON public.event_notification_outbox (event_id, revision)
+    WHERE delivered_at IS NULL;
+
+ALTER TABLE public.event_changes ADD COLUMN source_notification_id uuid
+    REFERENCES public.event_notification_outbox (id);
+
+CREATE FUNCTION public.notify_event_change() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog, public AS $$
+BEGIN
+    INSERT INTO public.event_notification_outbox (event_id, revision) VALUES (NEW.event_id, NEW.revision);
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER notify_event_change
+AFTER INSERT ON public.event_changes
+FOR EACH ROW WHEN (NEW.source_notification_id IS NULL) EXECUTE FUNCTION public.notify_event_change();
+
+ALTER TABLE public.event_attachments ADD COLUMN upload_revision bigint CHECK (upload_revision > 0);
+
+CREATE FUNCTION public.capture_attachment_revision() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog, public AS $$
+BEGIN
+    SELECT revision INTO NEW.upload_revision FROM public.events WHERE id = NEW.event_id FOR SHARE;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER capture_attachment_revision BEFORE INSERT ON public.event_attachments
+FOR EACH ROW EXECUTE FUNCTION public.capture_attachment_revision();
+
+CREATE TABLE public.attachment_results (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    attachment_id bigint NOT NULL REFERENCES public.event_attachments(id),
+    field_key text NOT NULL CHECK (field_key COLLATE "C" ~ '^[a-z][a-z0-9_]{0,63}$'),
+    unit_code text,
+    value_number numeric CHECK (value_number NOT IN ('NaN','Infinity','-Infinity')),
+    sheet_name text,
+    cell_ref text,
+    reason text,
+    applied_revision bigint CHECK (applied_revision > 0),
+    state text GENERATED ALWAYS AS (CASE WHEN applied_revision IS NULL THEN 'review' ELSE 'applied' END) STORED,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    UNIQUE (attachment_id, field_key),
+    CHECK ((applied_revision IS NULL) = (reason IS NOT NULL)),
+    CHECK (value_number IS NULL OR (sheet_name IS NOT NULL AND cell_ref IS NOT NULL))
+);
+
 COMMIT;

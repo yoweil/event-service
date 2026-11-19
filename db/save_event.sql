@@ -36,11 +36,11 @@ AS $$
                     v.value_date::text, public.event_audit_time(v.value_datetime), v.value_option);
 $$;
 
-CREATE OR REPLACE FUNCTION public.save_event(
+CREATE OR REPLACE FUNCTION public.save_event_with_source(
     p_type_id bigint, p_well_id text, p_status text, p_time_kind text,
     p_started_at timestamptz, p_ended_at timestamptz, p_description text,
-    p_actor_kind text, p_actor_id text, p_fields public.event_field_edit[] DEFAULT '{}',
-    p_event_id bigint DEFAULT NULL, p_expected_revision bigint DEFAULT NULL
+    p_actor_kind text, p_actor_id text, p_fields public.event_field_edit[],
+    p_event_id bigint, p_expected_revision bigint, p_source_notification_id uuid
 ) RETURNS public.events
 LANGUAGE plpgsql SET search_path = pg_catalog, public AS $$
 DECLARE
@@ -60,6 +60,13 @@ BEGIN
     IF p_actor_kind IS NULL OR p_actor_kind NOT IN ('user','service')
        OR p_actor_id IS NULL OR btrim(p_actor_id) = '' THEN
         RAISE EXCEPTION 'Missing or invalid actor' USING ERRCODE = '22023';
+    END IF;
+    IF p_source_notification_id IS NOT NULL AND NOT EXISTS (
+        SELECT FROM public.event_notification_outbox
+        WHERE id = p_source_notification_id AND event_id = p_event_id
+          AND revision = p_expected_revision AND attempts > 0
+    ) THEN
+        RAISE EXCEPTION 'Notification does not match an attempted delivery for this event revision' USING ERRCODE = '22023';
     END IF;
     IF p_fields IS NULL OR EXISTS (
         SELECT FROM unnest(p_fields) AS patch GROUP BY patch.field_key
@@ -118,14 +125,14 @@ BEGIN
             CONTINUE;
         END IF;
 
+        IF definition.is_archived THEN
+            RAISE EXCEPTION 'Archived field: %', edit.field_key USING ERRCODE = '23514';
+        END IF;
         IF num_nonnulls(edit.value_text, edit.value_number, edit.value_boolean, edit.value_date,
                         edit.value_datetime, edit.value_option) = 0 THEN
             DELETE FROM public.event_field_values WHERE event_id = card.id AND field_key = edit.field_key;
             saved_value := NULL;
         ELSE
-            IF definition.is_archived THEN
-                RAISE EXCEPTION 'Archived field: %', edit.field_key USING ERRCODE = '23514';
-            END IF;
             IF edit.value_option IS NOT NULL AND NOT EXISTS (
                 SELECT FROM public.event_field_options WHERE event_type_id = p_type_id
                   AND field_key = edit.field_key AND code = edit.value_option AND NOT is_archived
@@ -167,13 +174,81 @@ BEGIN
         WHERE id = p_event_id RETURNING * INTO card;
     END IF;
 
-    INSERT INTO public.event_changes (event_id, revision, operation, actor_kind, actor_id, changed_at)
+    INSERT INTO public.event_changes (event_id, revision, operation, actor_kind, actor_id, changed_at, source_notification_id)
     VALUES (card.id, card.revision, CASE WHEN p_event_id IS NULL THEN 'created' ELSE 'updated' END,
-            p_actor_kind, p_actor_id, card.updated_at);
+            p_actor_kind, p_actor_id, card.updated_at, p_source_notification_id);
     INSERT INTO public.event_change_items (event_id, revision, event_type_id, base_key, field_key, old_value, new_value)
     SELECT card.id, card.revision, p_type_id, d.base_key, d.field_key, d.old_value, d.new_value
     FROM unnest(changes) AS d;
     RETURN card;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.save_event(
+    p_type_id bigint, p_well_id text, p_status text, p_time_kind text,
+    p_started_at timestamptz, p_ended_at timestamptz, p_description text,
+    p_actor_kind text, p_actor_id text, p_fields public.event_field_edit[] DEFAULT '{}',
+    p_event_id bigint DEFAULT NULL, p_expected_revision bigint DEFAULT NULL
+) RETURNS public.events LANGUAGE sql AS $$
+    SELECT * FROM public.save_event_with_source(
+        p_type_id, p_well_id, p_status, p_time_kind, p_started_at, p_ended_at, p_description,
+        p_actor_kind, p_actor_id, p_fields, p_event_id, p_expected_revision, NULL
+    );
+$$;
+
+CREATE OR REPLACE FUNCTION public.record_attachment_result(
+    p_event bigint, p_attachment bigint, p_notice uuid, p_key text, p_unit text,
+    p_value numeric, p_sheet text, p_cell text, p_issue text
+) RETURNS public.attachment_results LANGUAGE plpgsql SET search_path = pg_catalog, public AS $$
+DECLARE
+    uploaded_revision bigint;
+    card public.events;
+    definition public.event_type_fields;
+    result public.attachment_results;
+    problem text := p_issue;
+    applied bigint;
+BEGIN
+    SELECT a.upload_revision INTO STRICT uploaded_revision
+    FROM public.event_attachments a JOIN public.notification_outbox n ON n.attachment_id = a.id
+    WHERE a.event_id = p_event AND a.id = p_attachment AND n.id = p_notice AND n.attempts > 0;
+
+    PERFORM t.id FROM public.event_types t JOIN public.events e ON e.event_type_id = t.id
+    WHERE e.id = p_event FOR SHARE OF t;
+    SELECT * INTO STRICT card FROM public.events WHERE id = p_event FOR UPDATE;
+    SELECT * INTO result FROM public.attachment_results WHERE attachment_id = p_attachment AND field_key = p_key;
+    IF FOUND THEN RETURN result; END IF;
+
+    SELECT * INTO definition FROM public.event_type_fields WHERE event_type_id = card.event_type_id AND field_key = p_key;
+    IF problem IS NULL THEN
+        CASE
+        WHEN definition.data_type IS NULL OR definition.is_archived OR definition.data_type NOT IN ('number','integer') THEN
+            problem := 'Поле отсутствует, архивировано или имеет другой тип.';
+        WHEN p_unit IS DISTINCT FROM definition.unit_code THEN
+            problem := 'Единица измерения файла отличается от единицы поля.';
+        WHEN uploaded_revision IS DISTINCT FROM card.revision THEN
+            problem := 'Ревизия при загрузке неизвестна или карточка уже изменилась.';
+        WHEN EXISTS (SELECT FROM public.event_field_values WHERE event_id = p_event AND field_key = p_key) THEN
+            problem := 'В карточке уже есть значение этого поля.';
+        ELSE
+            IF p_value IS NULL OR p_sheet IS NULL OR p_cell IS NULL THEN
+                RAISE EXCEPTION 'Expected a numeric value and its worksheet location' USING ERRCODE = '22023';
+            END IF;
+            BEGIN
+                SELECT s.revision INTO applied FROM public.save_event(card.event_type_id, card.well_id,
+                    card.status, card.time_kind, card.started_at, card.ended_at, card.description,
+                    'service', 'attachment-processor',
+                    ARRAY[ROW(p_key,NULL,p_value,NULL,NULL,NULL,NULL)::public.event_field_edit],
+                    card.id, card.revision) s;
+            EXCEPTION WHEN check_violation OR invalid_parameter_value THEN
+                problem := 'Значение не прошло проверку настроек карточки.';
+            END;
+        END CASE;
+    END IF;
+    INSERT INTO public.attachment_results (attachment_id, field_key, unit_code, value_number,
+        sheet_name, cell_ref, reason, applied_revision)
+    VALUES (p_attachment, p_key, p_unit, p_value, p_sheet, p_cell, problem, applied)
+    RETURNING * INTO result;
+    RETURN result;
 END;
 $$;
 

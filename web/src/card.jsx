@@ -286,7 +286,13 @@ export function EventCard({ api, types, id, initialType }) {
         <Busy />
       )}
       {!create && !record.error && (
-        <Attachments eventId={id} api={api} fields={definition.data?.fields} refreshCard={editing ? undefined : record.retry} />
+        <Attachments
+          eventId={id}
+          api={api}
+          card={card}
+          fields={definition.data?.fields}
+          refreshCard={editing ? undefined : record.retry}
+        />
       )}
     </>
   );

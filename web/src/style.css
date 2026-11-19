@@ -382,3 +382,9 @@ fieldset.panel {
   margin-block: var(--sp-2);
   overflow-wrap: anywhere;
 }
+.file-review-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}

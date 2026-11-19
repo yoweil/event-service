@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Alert, Button, Icon } from "@intetech/ui-kit";
+import { Alert, Button, Icon, Input } from "@intetech/ui-kit";
 import { useResource } from "./api.js";
 import { Busy, Failure } from "./common.jsx";
 import { showTime } from "./model.js";
@@ -11,7 +11,119 @@ function fileSize(bytes) {
   return numberFormat.format(bytes / (1024 * 1024)) + " МиБ";
 }
 
-export function Attachments({ eventId, api, fields, refreshCard }) {
+const reviewLabels = {
+  accept: "Принято",
+  correct: "Исправлено и принято",
+  reject: "Отклонено",
+};
+
+function shownNumber(value, unit) {
+  return value == null ? "—" : String(value).replace(".", ",") + (unit ? " " + unit : "");
+}
+
+function FileResult({ result, field, currentValue, canReview, decide }) {
+  const [correction, setCorrection] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const pending = result.state === "review" && !result.review_decision;
+  const numericField = field && !field.is_archived && ["integer", "number"].includes(field.data_type);
+  const canAccept = numericField && result.value_number != null && result.unit_code === field.unit_code;
+  const conflict = error?.status === 409;
+
+  async function submit(decision) {
+    if (saving || conflict) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await decide(decision, decision === "correct" ? correction.trim().replace(",", ".") : undefined);
+    } catch (err) {
+      if (err.name !== "AbortError") setError(err);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="file-result">
+      <strong>{reviewLabels[result.review_decision] ?? (pending ? "Требует проверки" : "Заполнено автоматически")}</strong>
+      <span>{field?.label ?? result.field_key}</span>
+      <span>Из файла · {shownNumber(result.value_number, result.unit_code)}</span>
+      {pending && numericField && <span>В карточке · {shownNumber(currentValue, field.unit_code)}</span>}
+      {result.sheet_name && <span>Лист «{result.sheet_name}» · {result.cell_ref}</span>}
+      {result.applied_revision && <span>Ревизия {result.applied_revision}</span>}
+      {pending && result.reason && <span>{result.reason}</span>}
+      {result.review_decision && (
+        <>
+          {result.reviewed_value_number != null && (
+            <span>Записано · {shownNumber(result.reviewed_value_number, field?.unit_code)}</span>
+          )}
+          <span>{result.reviewed_by_id} · {showTime(result.reviewed_at)}</span>
+        </>
+      )}
+      {pending && canReview && (
+        <>
+          {conflict ? (
+            <Alert variant="warning" title="Обновите результаты и проверьте значения ещё раз" role="alert" />
+          ) : (
+            error && <Failure error={error} />
+          )}
+          {correction !== null ? (
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (correction.trim()) submit("correct");
+              }}
+            >
+              <Input
+                block
+                inputMode="decimal"
+                label={field?.unit_code ? "Исправленное значение (" + field.unit_code + ")" : "Исправленное значение"}
+                value={correction}
+                onChange={(event) => setCorrection(event.target.value)}
+                disabled={saving || conflict}
+              />
+              <div className="file-review-actions">
+                <Button type="submit" size="sm" loading={saving} disabled={conflict || !correction.trim()}>
+                  Сохранить исправление
+                </Button>
+                <Button type="button" size="sm" variant="ghost" disabled={saving} onClick={() => setCorrection(null)}>
+                  Отмена
+                </Button>
+              </div>
+            </form>
+          ) : (
+            <div className="file-review-actions">
+              {canAccept && (
+                <Button type="button" size="sm" disabled={saving || conflict} onClick={() => submit("accept")}>
+                  Принять
+                </Button>
+              )}
+              {numericField && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  disabled={saving || conflict}
+                  onClick={() => {
+                    setError(null);
+                    setCorrection(canAccept ? String(result.value_number).replace(".", ",") : "");
+                  }}
+                >
+                  Исправить
+                </Button>
+              )}
+              <Button type="button" size="sm" variant="ghost" disabled={saving || conflict} onClick={() => submit("reject")}>
+                Отклонить
+              </Button>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+export function Attachments({ eventId, api, card, fields, refreshCard }) {
   const path = "/events/" + eventId + "/attachments";
   const list = useResource(api, path);
   const picker = useRef(null);
@@ -20,6 +132,8 @@ export function Attachments({ eventId, api, fields, refreshCard }) {
   const [failed, setFailed] = useState([]);
   const [downloading, setDownloading] = useState(null);
   const [downloadError, setDownloadError] = useState(null);
+  const definitions = new Map(fields?.map((field) => [field.field_key, field]));
+  const currentNumbers = new Map(card?.fields.map((row) => [row.field_key, row.value_number]));
   useEffect(() => {
     const controller = new AbortController();
     lifetime.current = controller;
@@ -69,6 +183,18 @@ export function Attachments({ eventId, api, fields, refreshCard }) {
       if (!signal.aborted) setDownloadError(err);
     } finally {
       if (!signal.aborted) setDownloading(null);
+    }
+  }
+  async function review(file, result, decision, value) {
+    const signal = lifetime.current.signal;
+    await api(path + "/" + file.id + "/results/" + result.id + "/review", {
+      method: "POST",
+      body: { decision, expected_revision: card.revision, value_number: value },
+      signal,
+    });
+    if (!signal.aborted) {
+      list.retry();
+      refreshCard();
     }
   }
   return (
@@ -133,16 +259,14 @@ export function Attachments({ eventId, api, fields, refreshCard }) {
                   {fileSize(file.size_bytes)} · {showTime(file.uploaded_at)} · {file.uploaded_by_id}
                 </span>
                 {file.results?.map((result) => (
-                  <div className="file-result" key={result.id}>
-                    <strong>{result.state === "applied" ? "Заполнено автоматически" : "Требует проверки"}</strong>
-                    <span>
-                      {fields?.find((field) => field.field_key === result.field_key)?.label ?? result.field_key}
-                      {result.value_number != null && " · " + String(result.value_number).replace(".", ",") + (result.unit_code ? " " + result.unit_code : "")}
-                    </span>
-                    {result.sheet_name && <span>Лист «{result.sheet_name}» · {result.cell_ref}</span>}
-                    {result.applied_revision && <span>Ревизия {result.applied_revision}</span>}
-                    {result.reason && <span>{result.reason}</span>}
-                  </div>
+                  <FileResult
+                    key={result.id}
+                    result={result}
+                    field={definitions.get(result.field_key)}
+                    currentValue={currentNumbers.get(result.field_key)}
+                    canReview={Boolean(refreshCard && card && fields)}
+                    decide={(decision, value) => review(file, result, decision, value)}
+                  />
                 ))}
               </div>
               <Button

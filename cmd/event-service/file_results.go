@@ -3,41 +3,128 @@ package main
 import (
 	"encoding/json"
 	"net/http"
-	"strconv"
 	"strings"
 )
+
+type attachmentResultInput struct {
+	Key   string       `json:"field_key"`
+	Unit  *string      `json:"unit_code"`
+	Value *json.Number `json:"value_number"`
+	Sheet *string      `json:"sheet_name"`
+	Cell  *string      `json:"cell_ref"`
+	Issue *string      `json:"issue"`
+}
+
+func (input attachmentResultInput) valid() bool {
+	return input.Key != "" &&
+		(input.Value != nil || input.Issue != nil) &&
+		(input.Issue == nil || strings.TrimSpace(*input.Issue) != "") &&
+		(input.Value == nil || (input.Sheet != nil && input.Cell != nil &&
+			strings.TrimSpace(*input.Sheet) != "" && strings.TrimSpace(*input.Cell) != ""))
+}
 
 func (a *api) recordAttachmentResult(w http.ResponseWriter, r *http.Request) {
 	eventID, ok := pathID(w, r, "event")
 	if !ok {
 		return
 	}
-	fileID, err := strconv.ParseInt(r.PathValue("attachment"), 10, 64)
-	if err != nil || fileID < 1 {
-		respondError(w, 400, "expected a positive attachment id")
+	fileID, ok := positivePathID(w, r, "attachment", "attachment")
+	if !ok {
 		return
 	}
 	var input struct {
-		Notice string       `json:"notification_id"`
-		Key    string       `json:"field_key"`
-		Unit   *string      `json:"unit_code"`
-		Value  *json.Number `json:"value_number"`
-		Sheet  *string      `json:"sheet_name"`
-		Cell   *string      `json:"cell_ref"`
-		Issue  *string      `json:"issue"`
+		Notice string `json:"notification_id"`
+		attachmentResultInput
 	}
 	if !readBody(w, r, &input) {
 		return
 	}
-	if input.Notice == "" || input.Key == "" || (input.Value == nil && input.Issue == nil) ||
-		(input.Issue != nil && strings.TrimSpace(*input.Issue) == "") ||
-		(input.Value != nil && (input.Sheet == nil || input.Cell == nil || strings.TrimSpace(*input.Sheet) == "" || strings.TrimSpace(*input.Cell) == "")) {
+	if input.Notice == "" || !input.valid() {
 		respondError(w, 400, "expected notification_id, field_key and either a sourced numeric value or an issue")
 		return
 	}
 	var result json.RawMessage
-	err = a.db.QueryRowContext(r.Context(), `SELECT row_to_json(r) FROM public.record_attachment_result($1,$2,$3,$4,$5,$6,$7,$8,$9) r`,
+	err := a.db.QueryRowContext(r.Context(), `SELECT row_to_json(r) FROM public.record_attachment_result($1,$2,$3,$4,$5,$6,$7,$8,$9) r`,
 		eventID, fileID, input.Notice, input.Key, input.Unit, input.Value, input.Sheet, input.Cell, input.Issue).Scan(&result)
+	if err != nil {
+		databaseError(w, err)
+		return
+	}
+	respond(w, http.StatusOK, result)
+}
+
+func (a *api) recordAttachmentResults(w http.ResponseWriter, r *http.Request) {
+	eventID, ok := pathID(w, r, "event")
+	if !ok {
+		return
+	}
+	fileID, ok := positivePathID(w, r, "attachment", "attachment")
+	if !ok {
+		return
+	}
+	var input struct {
+		Notice  string                  `json:"notification_id"`
+		Results []attachmentResultInput `json:"results"`
+	}
+	if !readBody(w, r, &input) {
+		return
+	}
+	if input.Notice == "" || len(input.Results) == 0 {
+		respondError(w, http.StatusBadRequest, "expected notification_id and a nonempty results array")
+		return
+	}
+	for _, result := range input.Results {
+		if !result.valid() {
+			respondError(w, http.StatusBadRequest, "expected field_key and either a sourced numeric value or an issue for each result")
+			return
+		}
+	}
+	results, err := arrayParam(input.Results)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "invalid results")
+		return
+	}
+	var response json.RawMessage
+	err = a.db.QueryRowContext(r.Context(), `
+        SELECT array_to_json(public.record_attachment_results($1,$2,$3,
+            ARRAY(SELECT result FROM json_populate_recordset(NULL::public.attachment_result_input, $4::json) AS result)))`,
+		eventID, fileID, input.Notice, results).Scan(&response)
+	if err != nil {
+		databaseError(w, err)
+		return
+	}
+	respond(w, http.StatusOK, response)
+}
+
+func (a *api) reviewAttachmentResult(w http.ResponseWriter, r *http.Request) {
+	eventID, ok := pathID(w, r, "event")
+	if !ok {
+		return
+	}
+	fileID, ok := positivePathID(w, r, "attachment", "attachment")
+	if !ok {
+		return
+	}
+	resultID, ok := positivePathID(w, r, "result", "result")
+	if !ok {
+		return
+	}
+	var input struct {
+		Decision         string       `json:"decision"`
+		ExpectedRevision int64        `json:"expected_revision"`
+		Value            *json.Number `json:"value_number"`
+	}
+	if !readBody(w, r, &input) {
+		return
+	}
+	if input.ExpectedRevision < 1 || (input.Decision != "accept" && input.Decision != "correct" && input.Decision != "reject") ||
+		(input.Decision == "correct") != (input.Value != nil) {
+		respondError(w, http.StatusBadRequest, "expected decision and positive expected_revision, with value_number only for correct")
+		return
+	}
+	var result json.RawMessage
+	err := a.db.QueryRowContext(r.Context(), `SELECT row_to_json(r) FROM public.review_attachment_result($1,$2,$3,$4,$5,$6,$7) r`,
+		eventID, fileID, resultID, input.ExpectedRevision, input.Decision, input.Value, a.actor).Scan(&result)
 	if err != nil {
 		databaseError(w, err)
 		return

@@ -18,6 +18,16 @@ BEGIN
             base_key text, field_key text, old_value text, new_value text
         );
     END IF;
+    IF to_regtype('public.attachment_result_input') IS NULL THEN
+        CREATE TYPE public.attachment_result_input AS (
+            field_key text,
+            unit_code text,
+            value_number numeric,
+            sheet_name text,
+            cell_ref text,
+            issue text
+        );
+    END IF;
 END;
 $$;
 
@@ -196,18 +206,34 @@ CREATE OR REPLACE FUNCTION public.save_event(
     );
 $$;
 
-CREATE OR REPLACE FUNCTION public.record_attachment_result(
-    p_event bigint, p_attachment bigint, p_notice uuid, p_key text, p_unit text,
-    p_value numeric, p_sheet text, p_cell text, p_issue text
-) RETURNS public.attachment_results LANGUAGE plpgsql SET search_path = pg_catalog, public AS $$
+CREATE OR REPLACE FUNCTION public.record_attachment_results(
+    p_event bigint, p_attachment bigint, p_notice uuid, p_results public.attachment_result_input[]
+) RETURNS public.attachment_results[] LANGUAGE plpgsql SET search_path = pg_catalog, public AS $$
 DECLARE
     uploaded_revision bigint;
     card public.events;
-    definition public.event_type_fields;
-    result public.attachment_results;
-    problem text := p_issue;
+    pending public.attachment_result_input[];
+    edits public.event_field_edit[];
     applied bigint;
+    save_failure text;
 BEGIN
+    IF coalesce(cardinality(p_results), 0) = 0 OR EXISTS (
+        SELECT FROM unnest(p_results) AS input
+        WHERE input.field_key IS NULL OR input.field_key COLLATE "C" !~ '^[a-z][a-z0-9_]{0,63}$'
+           OR (input.value_number IS NULL AND input.issue IS NULL)
+           OR (input.issue IS NOT NULL AND btrim(input.issue) = '')
+           OR (input.value_number IS NOT NULL AND (
+               coalesce(btrim(input.sheet_name), '') = '' OR coalesce(btrim(input.cell_ref), '') = ''
+               OR input.value_number IN ('NaN','Infinity','-Infinity')
+           ))
+    ) THEN
+        RAISE EXCEPTION 'Expected a field key and either a sourced number or an issue for each result'
+            USING ERRCODE = '22023';
+    END IF;
+    IF EXISTS (SELECT FROM unnest(p_results) AS input GROUP BY input.field_key HAVING count(*) > 1) THEN
+        RAISE EXCEPTION 'Each field may occur only once in a batch' USING ERRCODE = '22023';
+    END IF;
+
     SELECT a.upload_revision INTO STRICT uploaded_revision
     FROM public.event_attachments a JOIN public.notification_outbox n ON n.attachment_id = a.id
     WHERE a.event_id = p_event AND a.id = p_attachment AND n.id = p_notice AND n.attempts > 0;
@@ -215,40 +241,128 @@ BEGIN
     PERFORM t.id FROM public.event_types t JOIN public.events e ON e.event_type_id = t.id
     WHERE e.id = p_event FOR SHARE OF t;
     SELECT * INTO STRICT card FROM public.events WHERE id = p_event FOR UPDATE;
-    SELECT * INTO result FROM public.attachment_results WHERE attachment_id = p_attachment AND field_key = p_key;
-    IF FOUND THEN RETURN result; END IF;
 
-    SELECT * INTO definition FROM public.event_type_fields WHERE event_type_id = card.event_type_id AND field_key = p_key;
-    IF problem IS NULL THEN
-        CASE
-        WHEN definition.data_type IS NULL OR definition.is_archived OR definition.data_type NOT IN ('number','integer') THEN
-            problem := 'Поле отсутствует, архивировано или имеет другой тип.';
-        WHEN p_unit IS DISTINCT FROM definition.unit_code THEN
-            problem := 'Единица измерения файла отличается от единицы поля.';
-        WHEN uploaded_revision IS DISTINCT FROM card.revision THEN
-            problem := 'Ревизия при загрузке неизвестна или карточка уже изменилась.';
-        WHEN EXISTS (SELECT FROM public.event_field_values WHERE event_id = p_event AND field_key = p_key) THEN
-            problem := 'В карточке уже есть значение этого поля.';
-        ELSE
-            IF p_value IS NULL OR p_sheet IS NULL OR p_cell IS NULL THEN
-                RAISE EXCEPTION 'Expected a numeric value and its worksheet location' USING ERRCODE = '22023';
-            END IF;
-            BEGIN
-                SELECT s.revision INTO applied FROM public.save_event(card.event_type_id, card.well_id,
-                    card.status, card.time_kind, card.started_at, card.ended_at, card.description,
-                    'service', 'attachment-processor',
-                    ARRAY[ROW(p_key,NULL,p_value,NULL,NULL,NULL,NULL)::public.event_field_edit],
-                    card.id, card.revision) s;
-            EXCEPTION WHEN check_violation OR invalid_parameter_value THEN
-                problem := 'Значение не прошло проверку настроек карточки.';
-            END;
-        END CASE;
+    pending := ARRAY(
+        SELECT ROW(input.field_key, input.unit_code, input.value_number, input.sheet_name, input.cell_ref,
+            CASE
+                WHEN input.issue IS NOT NULL THEN input.issue
+                WHEN f.field_key IS NULL OR f.is_archived OR f.data_type NOT IN ('number','integer')
+                    THEN 'Поле отсутствует, архивировано или имеет другой тип.'
+                WHEN input.unit_code IS DISTINCT FROM f.unit_code
+                    THEN 'Единица измерения файла отличается от единицы поля.'
+                WHEN uploaded_revision IS DISTINCT FROM card.revision
+                    THEN 'Ревизия при загрузке неизвестна или карточка уже изменилась.'
+                WHEN v.event_id IS NOT NULL
+                    THEN 'В карточке уже есть значение этого поля.'
+                WHEN input.value_number < f.min_number OR input.value_number > f.max_number
+                  OR (f.data_type = 'integer' AND trunc(input.value_number) <> input.value_number)
+                    THEN 'Значение не прошло проверку настроек карточки.'
+            END
+        )::public.attachment_result_input
+        FROM unnest(p_results) WITH ORDINALITY AS input
+        LEFT JOIN public.event_type_fields f ON f.event_type_id = card.event_type_id AND f.field_key = input.field_key
+        LEFT JOIN public.event_field_values v ON v.event_id = card.id AND v.field_key = input.field_key
+        WHERE NOT EXISTS (
+            SELECT FROM public.attachment_results r WHERE r.attachment_id = p_attachment AND r.field_key = input.field_key
+        )
+        ORDER BY input.ordinality
+    );
+
+    edits := ARRAY(
+        SELECT ROW(input.field_key,NULL,input.value_number,NULL,NULL,NULL,NULL)::public.event_field_edit
+        FROM unnest(pending) AS input WHERE input.issue IS NULL
+    );
+    IF cardinality(edits) > 0 THEN
+        BEGIN
+            SELECT s.revision INTO applied
+            FROM public.save_event(card.event_type_id, card.well_id, card.status, card.time_kind,
+                card.started_at, card.ended_at, card.description, 'service', 'attachment-processor',
+                edits, card.id, card.revision) s;
+        EXCEPTION WHEN check_violation OR invalid_parameter_value THEN
+            save_failure := 'Значение не прошло проверку настроек карточки.';
+        END;
     END IF;
+
     INSERT INTO public.attachment_results (attachment_id, field_key, unit_code, value_number,
         sheet_name, cell_ref, reason, applied_revision)
-    VALUES (p_attachment, p_key, p_unit, p_value, p_sheet, p_cell, problem, applied)
-    RETURNING * INTO result;
-    RETURN result;
+    SELECT p_attachment, input.field_key, input.unit_code, input.value_number, input.sheet_name, input.cell_ref,
+        coalesce(input.issue, save_failure), CASE WHEN input.issue IS NULL THEN applied END
+    FROM unnest(pending) AS input;
+
+    RETURN (
+        SELECT array_agg(r ORDER BY input.ordinality)
+        FROM unnest(p_results) WITH ORDINALITY AS input
+        JOIN public.attachment_results r ON r.attachment_id = p_attachment AND r.field_key = input.field_key
+    );
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.record_attachment_result(
+    p_event bigint, p_attachment bigint, p_notice uuid, p_key text, p_unit text,
+    p_value numeric, p_sheet text, p_cell text, p_issue text
+) RETURNS public.attachment_results LANGUAGE sql AS $$
+    SELECT (public.record_attachment_results(p_event, p_attachment, p_notice,
+        ARRAY[ROW(p_key,p_unit,p_value,p_sheet,p_cell,p_issue)::public.attachment_result_input]))[1];
+$$;
+
+CREATE OR REPLACE FUNCTION public.review_attachment_result(
+    p_event bigint, p_attachment bigint, p_result bigint, p_expected_revision bigint,
+    p_decision text, p_value numeric, p_actor text
+) RETURNS public.attachment_results LANGUAGE plpgsql SET search_path = pg_catalog, public AS $$
+DECLARE
+    card public.events;
+    proposal public.attachment_results;
+    definition public.event_type_fields;
+    chosen_value numeric;
+    saved_revision bigint;
+BEGIN
+    IF p_decision IS NULL OR p_decision NOT IN ('accept','correct','reject')
+       OR (p_decision = 'correct') <> (p_value IS NOT NULL)
+       OR p_expected_revision IS NULL OR p_expected_revision < 1
+       OR coalesce(btrim(p_actor), '') = '' THEN
+        RAISE EXCEPTION 'Invalid review decision, value, revision or author' USING ERRCODE = '22023';
+    END IF;
+
+    PERFORM t.id FROM public.event_types t JOIN public.events e ON e.event_type_id = t.id
+    WHERE e.id = p_event FOR SHARE OF t;
+    SELECT * INTO STRICT card FROM public.events WHERE id = p_event FOR UPDATE;
+    SELECT r.* INTO STRICT proposal
+    FROM public.attachment_results r JOIN public.event_attachments a ON a.id = r.attachment_id
+    WHERE r.id = p_result AND a.id = p_attachment AND a.event_id = p_event;
+
+    IF proposal.review_decision = p_decision AND proposal.reviewed_by_id = p_actor
+       AND (p_decision <> 'correct' OR proposal.reviewed_value_number = p_value) THEN
+        RETURN proposal;
+    END IF;
+    IF proposal.applied_revision IS NOT NULL OR proposal.review_decision IS NOT NULL THEN
+        RAISE EXCEPTION 'Result has already been resolved' USING ERRCODE = 'AR409';
+    END IF;
+    IF card.revision <> p_expected_revision THEN
+        RAISE EXCEPTION 'Event revision has changed' USING ERRCODE = 'EV409';
+    END IF;
+
+    IF p_decision <> 'reject' THEN
+        SELECT * INTO definition FROM public.event_type_fields
+        WHERE event_type_id = card.event_type_id AND field_key = proposal.field_key;
+        IF NOT FOUND OR definition.is_archived OR definition.data_type NOT IN ('integer','number') THEN
+            RAISE EXCEPTION 'Review requires an active numeric field' USING ERRCODE = '22023';
+        END IF;
+        IF p_decision = 'accept' AND
+           (proposal.value_number IS NULL OR proposal.unit_code IS DISTINCT FROM definition.unit_code) THEN
+            RAISE EXCEPTION 'Accept requires a proposed number in the field unit' USING ERRCODE = '22023';
+        END IF;
+        chosen_value := CASE WHEN p_decision = 'accept' THEN proposal.value_number ELSE p_value END;
+        SELECT s.revision INTO saved_revision
+        FROM public.save_event(card.event_type_id, card.well_id, card.status, card.time_kind,
+            card.started_at, card.ended_at, card.description, 'user', p_actor,
+            ARRAY[ROW(proposal.field_key,NULL,chosen_value,NULL,NULL,NULL,NULL)::public.event_field_edit],
+            card.id, card.revision) s;
+    END IF;
+
+    UPDATE public.attachment_results SET review_decision = p_decision, reviewed_by_id = p_actor,
+        reviewed_at = clock_timestamp(), reviewed_value_number = chosen_value, reviewed_revision = saved_revision
+    WHERE id = p_result RETURNING * INTO proposal;
+    RETURN proposal;
 END;
 $$;
 

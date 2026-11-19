@@ -4,6 +4,7 @@ const numericKeys = new Set([
   "revision",
   "expected_revision",
   "value_number",
+  "reviewed_value_number",
   "min_number",
   "max_number",
 ]);

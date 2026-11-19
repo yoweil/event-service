@@ -29,17 +29,25 @@ func newHandler(db queryer, token, actor string, requestTimeout time.Duration) h
 	mux.HandleFunc("POST /event-types", a.createType)
 	mux.HandleFunc("GET /event-types/{id}", a.getType)
 	mux.HandleFunc("PATCH /event-types/{id}", a.editType)
+
 	mux.HandleFunc("POST /events", a.saveEvent)
 	mux.HandleFunc("GET /events", a.listEvents)
 	mux.HandleFunc("PUT /events/{id}", a.saveEvent)
 	mux.HandleFunc("GET /events/{id}", a.getEvent)
+
 	mux.HandleFunc("GET /events/{id}/attachments", a.listAttachments)
 	mux.HandleFunc("POST /events/{id}/attachments", a.uploadAttachment)
 	mux.HandleFunc("GET /events/{id}/attachments/{attachment}", a.downloadAttachment)
 	mux.HandleFunc("POST /events/{id}/attachments/{attachment}/results", a.recordAttachmentResult)
+	mux.HandleFunc("POST /events/{id}/attachments/{attachment}/results/batch", a.recordAttachmentResults)
+	mux.HandleFunc("POST /events/{id}/attachments/{attachment}/results/{result}/review", a.reviewAttachmentResult)
+
+	mux.HandleFunc("/events/{id}/attachments/{attachment}/results/{result}/review", methodNotAllowed("POST"))
 	mux.HandleFunc("/events/{id}/attachments/{attachment}/results", methodNotAllowed("POST"))
+	mux.HandleFunc("/events/{id}/attachments/{attachment}/results/batch", methodNotAllowed("POST"))
 	mux.HandleFunc("/events/{id}/attachments", methodNotAllowed("GET, HEAD, POST"))
 	mux.HandleFunc("/events/{id}/attachments/{attachment}", methodNotAllowed("GET, HEAD"))
+
 	mux.HandleFunc("/event-types", methodNotAllowed("GET, HEAD, POST"))
 	mux.HandleFunc("/event-types/{id}", methodNotAllowed("GET, HEAD, PATCH"))
 	mux.HandleFunc("/events", methodNotAllowed("GET, HEAD, POST"))
@@ -47,6 +55,7 @@ func newHandler(db queryer, token, actor string, requestTimeout time.Duration) h
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		respondError(w, http.StatusNotFound, "route not found")
 	})
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		scheme, credential, ok := strings.Cut(r.Header.Get("Authorization"), " ")
 		if !ok || !strings.EqualFold(scheme, "Bearer") || credential == "" || subtle.ConstantTimeCompare([]byte(credential), []byte(token)) != 1 {
@@ -117,6 +126,9 @@ func databaseError(w http.ResponseWriter, err error) {
 		case "EV409":
 			respondError(w, http.StatusConflict, "event revision has changed")
 			return
+		case "AR409":
+			respondError(w, http.StatusConflict, "result has already been resolved")
+			return
 		case "ET409":
 			respondError(w, http.StatusConflict, "event type has changed")
 			return
@@ -143,7 +155,11 @@ func databaseError(w http.ResponseWriter, err error) {
 }
 
 func pathID(w http.ResponseWriter, r *http.Request, resource string) (int64, bool) {
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	return positivePathID(w, r, "id", resource)
+}
+
+func positivePathID(w http.ResponseWriter, r *http.Request, param, resource string) (int64, bool) {
+	id, err := strconv.ParseInt(r.PathValue(param), 10, 64)
 	if err != nil || id < 1 {
 		respondError(w, http.StatusBadRequest, "expected a positive "+resource+" id")
 		return 0, false

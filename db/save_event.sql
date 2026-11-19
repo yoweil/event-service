@@ -25,8 +25,15 @@ BEGIN
             value_number numeric,
             sheet_name text,
             cell_ref text,
-            issue text
+            issue text,
+            calculation_method text
         );
+    ELSIF NOT EXISTS (
+        SELECT FROM pg_catalog.pg_attribute
+        WHERE attrelid = 'public.attachment_result_input'::regclass
+          AND attname = 'calculation_method' AND NOT attisdropped
+    ) THEN
+        ALTER TYPE public.attachment_result_input ADD ATTRIBUTE calculation_method text;
     END IF;
 END;
 $$;
@@ -207,7 +214,8 @@ CREATE OR REPLACE FUNCTION public.save_event(
 $$;
 
 CREATE OR REPLACE FUNCTION public.record_attachment_results(
-    p_event bigint, p_attachment bigint, p_notice uuid, p_results public.attachment_result_input[]
+    p_event bigint, p_attachment bigint, p_notice uuid, p_results public.attachment_result_input[],
+    p_actor_kind text, p_actor_id text
 ) RETURNS public.attachment_results[] LANGUAGE plpgsql SET search_path = pg_catalog, public AS $$
 DECLARE
     uploaded_revision bigint;
@@ -217,6 +225,9 @@ DECLARE
     applied bigint;
     save_failure text;
 BEGIN
+    IF p_actor_kind IS NULL OR p_actor_kind NOT IN ('user','service') OR coalesce(btrim(p_actor_id), '') = '' THEN
+        RAISE EXCEPTION 'Missing or invalid result author' USING ERRCODE = '22023';
+    END IF;
     IF coalesce(cardinality(p_results), 0) = 0 OR EXISTS (
         SELECT FROM unnest(p_results) AS input
         WHERE input.field_key IS NULL OR input.field_key COLLATE "C" !~ '^[a-z][a-z0-9_]{0,63}$'
@@ -257,7 +268,7 @@ BEGIN
                 WHEN input.value_number < f.min_number OR input.value_number > f.max_number
                   OR (f.data_type = 'integer' AND trunc(input.value_number) <> input.value_number)
                     THEN 'Значение не прошло проверку настроек карточки.'
-            END
+            END, input.calculation_method
         )::public.attachment_result_input
         FROM unnest(p_results) WITH ORDINALITY AS input
         LEFT JOIN public.event_type_fields f ON f.event_type_id = card.event_type_id AND f.field_key = input.field_key
@@ -276,7 +287,7 @@ BEGIN
         BEGIN
             SELECT s.revision INTO applied
             FROM public.save_event(card.event_type_id, card.well_id, card.status, card.time_kind,
-                card.started_at, card.ended_at, card.description, 'service', 'attachment-processor',
+                card.started_at, card.ended_at, card.description, p_actor_kind, p_actor_id,
                 edits, card.id, card.revision) s;
         EXCEPTION WHEN check_violation OR invalid_parameter_value THEN
             save_failure := 'Значение не прошло проверку настроек карточки.';
@@ -284,9 +295,10 @@ BEGIN
     END IF;
 
     INSERT INTO public.attachment_results (attachment_id, field_key, unit_code, value_number,
-        sheet_name, cell_ref, reason, applied_revision)
+        sheet_name, cell_ref, calculation_method, reason, applied_revision, submitted_by_kind, submitted_by_id)
     SELECT p_attachment, input.field_key, input.unit_code, input.value_number, input.sheet_name, input.cell_ref,
-        coalesce(input.issue, save_failure), CASE WHEN input.issue IS NULL THEN applied END
+        input.calculation_method, coalesce(input.issue, save_failure), CASE WHEN input.issue IS NULL THEN applied END,
+        p_actor_kind, p_actor_id
     FROM unnest(pending) AS input;
 
     RETURN (
@@ -297,12 +309,35 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION public.record_attachment_results(
+    p_event bigint, p_attachment bigint, p_notice uuid, p_results public.attachment_result_input[]
+) RETURNS public.attachment_results[] LANGUAGE sql AS $$
+    SELECT public.record_attachment_results(p_event,p_attachment,p_notice,p_results,'service','attachment-processor');
+$$;
+
+CREATE OR REPLACE FUNCTION public.record_attachment_result(
+    p_event bigint, p_attachment bigint, p_notice uuid, p_key text, p_unit text,
+    p_value numeric, p_sheet text, p_cell text, p_issue text, p_calculation_method text,
+    p_actor_kind text, p_actor_id text
+) RETURNS public.attachment_results LANGUAGE sql AS $$
+    SELECT (public.record_attachment_results(p_event, p_attachment, p_notice,
+        ARRAY[ROW(p_key,p_unit,p_value,p_sheet,p_cell,p_issue,p_calculation_method)::public.attachment_result_input],
+        p_actor_kind,p_actor_id))[1];
+$$;
+
+CREATE OR REPLACE FUNCTION public.record_attachment_result(
+    p_event bigint, p_attachment bigint, p_notice uuid, p_key text, p_unit text,
+    p_value numeric, p_sheet text, p_cell text, p_issue text, p_calculation_method text
+) RETURNS public.attachment_results LANGUAGE sql AS $$
+    SELECT * FROM public.record_attachment_result(p_event,p_attachment,p_notice,p_key,p_unit,p_value,
+        p_sheet,p_cell,p_issue,p_calculation_method,'service','attachment-processor');
+$$;
+
 CREATE OR REPLACE FUNCTION public.record_attachment_result(
     p_event bigint, p_attachment bigint, p_notice uuid, p_key text, p_unit text,
     p_value numeric, p_sheet text, p_cell text, p_issue text
 ) RETURNS public.attachment_results LANGUAGE sql AS $$
-    SELECT (public.record_attachment_results(p_event, p_attachment, p_notice,
-        ARRAY[ROW(p_key,p_unit,p_value,p_sheet,p_cell,p_issue)::public.attachment_result_input]))[1];
+    SELECT * FROM public.record_attachment_result(p_event,p_attachment,p_notice,p_key,p_unit,p_value,p_sheet,p_cell,p_issue,NULL);
 $$;
 
 CREATE OR REPLACE FUNCTION public.review_attachment_result(

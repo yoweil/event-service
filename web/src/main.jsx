@@ -16,7 +16,7 @@ import "@intetech/ui-kit/styles.css";
 import "@intetech/ui-kit/fonts.css";
 import "./style.css";
 import { callApi, useResource } from "./api.js";
-import { emptyFilters } from "./model.js";
+import { emptyFilters, showActor } from "./model.js";
 import { Busy, Failure } from "./common.jsx";
 import { Registry } from "./registry.jsx";
 import { EventCard } from "./card.jsx";
@@ -24,7 +24,7 @@ import { TypeCatalog, TypeDetails } from "./type-catalog.jsx";
 import { TypeEditor, EditTypePage } from "./type-editor.jsx";
 
 const sessionKey = "events.api-token";
-function Header({ logout }) {
+function Header({ logout, actor }) {
   const { theme, toggleTheme } = useTheme();
   return (
     <header className="app-bar">
@@ -36,6 +36,7 @@ function Header({ logout }) {
           Сервис событий
         </a>
         <div className="actions">
+          {actor && <span className="session-actor">{showActor(actor.kind, actor.id)}</span>}
           <IconButton
             aria-label="Сменить тему"
             title="Сменить тему"
@@ -54,21 +55,9 @@ function Header({ logout }) {
 }
 function Login({ connect, message }) {
   const [value, setValue] = useState("");
-  const [error, setError] = useState(message);
-  const [busy, setBusy] = useState(false);
-  async function submit(e) {
+  function submit(e) {
     e.preventDefault();
-    setBusy(true);
-    setError("");
-    try {
-      const token = value.trim();
-      await callApi(token, "/event-types");
-      connect(token);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setBusy(false);
-    }
+    connect(value.trim());
   }
   return (
     <main className="login">
@@ -85,17 +74,17 @@ function Login({ connect, message }) {
           autoFocus
           block
           onChange={(e) => setValue(e.target.value)}
-          helper="Введите API_TOKEN локального сервера."
+          helper="Введите выданный вам токен."
         />
-        {error && <Alert variant="danger" title={error} role="alert" />}
-        <Button type="submit" disabled={!value.trim()} loading={busy}>
+        {message && <Alert variant="danger" title={message} role="alert" />}
+        <Button type="submit" disabled={!value.trim()}>
           Открыть журнал
         </Button>
       </form>
     </main>
   );
 }
-function Workspace({ api }) {
+function Workspace({ api, canReview }) {
   const [route, setRoute] = useState(() => location.hash.slice(1) || "/");
   const [filters, setFilters] = useState(emptyFilters);
   const catalog = useResource(api, "/event-types");
@@ -137,7 +126,7 @@ function Workspace({ api }) {
   else if (typeDetails) screen = <TypeDetails api={api} id={typeDetails[1]} />;
   else if (path === "/types") screen = <TypeCatalog types={catalog.data} />;
   else if (match)
-    screen = <EventCard key={route} id={match[1]} initialType={typeId} types={catalog.data} api={api} />;
+    screen = <EventCard key={route} id={match[1]} initialType={typeId} types={catalog.data} api={api} canReview={canReview} />;
   else screen = <Registry api={api} types={catalog.data} filters={filters} apply={setFilters} />;
   return <main>{screen}</main>;
 }
@@ -169,10 +158,17 @@ function App() {
     setToken(value);
     setMessage("");
   }
+  if (token) return <SignedIn key={token} api={api} logout={logout} />;
+  return <><Header /><Login connect={connect} message={message} /></>;
+}
+
+function SignedIn({ api, logout }) {
+  const session = useResource(api, "/me");
   return (
     <>
-      <Header logout={token ? logout : null} />
-      {token ? <Workspace api={api} /> : <Login connect={connect} message={message} />}
+      <Header logout={logout} actor={session.data} />
+      {session.error ? <main><Failure error={session.error} retry={session.retry} /></main>
+        : session.data ? <Workspace api={api} canReview={session.data.can_review} /> : <main><Busy /></main>}
     </>
   );
 }

@@ -34,6 +34,11 @@ export const valueColumns = {
   select: "value_option",
 };
 export const statusName = (s) => (s === "ready" ? "Готово" : "Черновик");
+export function showActor(kind, id) {
+  if (kind === "user") return "Оператор · " + id;
+  if (kind === "service") return "Программа · " + id;
+  return id;
+}
 export const showTime = (value) =>
   value
     ? new Intl.DateTimeFormat("ru-RU", { dateStyle: "short", timeStyle: "short" }).format(new Date(value))

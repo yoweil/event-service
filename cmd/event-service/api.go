@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/subtle"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -18,13 +18,17 @@ import (
 )
 
 type api struct {
-	db    queryer
-	actor string
+	db queryer
 }
 
-func newHandler(db queryer, token, actor string, requestTimeout time.Duration) http.Handler {
-	a := api{db: db, actor: actor}
+func newHandler(db queryer, tokens credentials, requestTimeout time.Duration) http.Handler {
+	a := api{db: db}
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /me", func(w http.ResponseWriter, r *http.Request) {
+		who := requestActor(r.Context())
+		respond(w, http.StatusOK, map[string]any{"kind": who.Kind, "id": who.ID, "can_review": who.canReview()})
+	})
+	mux.HandleFunc("/me", methodNotAllowed("GET, HEAD"))
 	mux.HandleFunc("GET /event-types", a.listTypes)
 	mux.HandleFunc("POST /event-types", a.createType)
 	mux.HandleFunc("GET /event-types/{id}", a.getType)
@@ -34,6 +38,8 @@ func newHandler(db queryer, token, actor string, requestTimeout time.Duration) h
 	mux.HandleFunc("GET /events", a.listEvents)
 	mux.HandleFunc("PUT /events/{id}", a.saveEvent)
 	mux.HandleFunc("GET /events/{id}", a.getEvent)
+	mux.HandleFunc("GET /events/{id}/history", a.eventHistory)
+	mux.HandleFunc("/events/{id}/history", methodNotAllowed("GET, HEAD"))
 
 	mux.HandleFunc("GET /events/{id}/attachments", a.listAttachments)
 	mux.HandleFunc("POST /events/{id}/attachments", a.uploadAttachment)
@@ -58,14 +64,15 @@ func newHandler(db queryer, token, actor string, requestTimeout time.Duration) h
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		scheme, credential, ok := strings.Cut(r.Header.Get("Authorization"), " ")
-		if !ok || !strings.EqualFold(scheme, "Bearer") || credential == "" || subtle.ConstantTimeCompare([]byte(credential), []byte(token)) != 1 {
+		who, known := tokens[sha256.Sum256([]byte(credential))]
+		if !ok || !strings.EqualFold(scheme, "Bearer") || !known {
 			w.Header().Set("WWW-Authenticate", "Bearer")
 			respondError(w, http.StatusUnauthorized, "invalid bearer token")
 			return
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
 		defer cancel()
-		mux.ServeHTTP(w, r.WithContext(ctx))
+		mux.ServeHTTP(w, r.WithContext(context.WithValue(ctx, actorKey{}, who)))
 	})
 }
 

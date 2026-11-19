@@ -382,6 +382,22 @@ fieldset.panel {
   margin-block: var(--sp-2);
   overflow-wrap: anywhere;
 }
+.session-actor {
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+.event-history {
+  margin-top: var(--sp-4);
+  overflow-wrap: anywhere;
+}
+.event-history summary {
+  cursor: pointer;
+}
+.event-history ul {
+  margin-block: var(--sp-2);
+  padding-inline-start: var(--sp-5);
+}
 .file-review-actions {
   display: flex;
   flex-wrap: wrap;

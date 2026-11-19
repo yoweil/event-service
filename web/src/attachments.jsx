@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Alert, Button, Icon, Input } from "@intetech/ui-kit";
 import { useResource } from "./api.js";
 import { Busy, Failure } from "./common.jsx";
-import { showTime } from "./model.js";
+import { showActor, showTime } from "./model.js";
 
 const numberFormat = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 1 });
 function fileSize(bytes) {
@@ -50,6 +50,8 @@ function FileResult({ result, field, currentValue, canReview, decide }) {
       <span>Из файла · {shownNumber(result.value_number, result.unit_code)}</span>
       {pending && numericField && <span>В карточке · {shownNumber(currentValue, field.unit_code)}</span>}
       {result.sheet_name && <span>Лист «{result.sheet_name}» · {result.cell_ref}</span>}
+      {result.calculation_method && <span>Способ расчёта · {result.calculation_method}</span>}
+      {result.submitted_by_id && <span>Источник · {showActor(result.submitted_by_kind, result.submitted_by_id)}</span>}
       {result.applied_revision && <span>Ревизия {result.applied_revision}</span>}
       {pending && result.reason && <span>{result.reason}</span>}
       {result.review_decision && (
@@ -123,7 +125,7 @@ function FileResult({ result, field, currentValue, canReview, decide }) {
   );
 }
 
-export function Attachments({ eventId, api, card, fields, refreshCard }) {
+export function Attachments({ eventId, api, card, fields, refreshCard, canReview }) {
   const path = "/events/" + eventId + "/attachments";
   const list = useResource(api, path);
   const picker = useRef(null);
@@ -256,7 +258,7 @@ export function Attachments({ eventId, api, card, fields, refreshCard }) {
               <div className="attachment-info">
                 <strong>{file.filename}</strong>
                 <span>
-                  {fileSize(file.size_bytes)} · {showTime(file.uploaded_at)} · {file.uploaded_by_id}
+                  {fileSize(file.size_bytes)} · {showTime(file.uploaded_at)} · {showActor(file.uploaded_by_kind, file.uploaded_by_id)}
                 </span>
                 {file.results?.map((result) => (
                   <FileResult
@@ -264,7 +266,7 @@ export function Attachments({ eventId, api, card, fields, refreshCard }) {
                     result={result}
                     field={definitions.get(result.field_key)}
                     currentValue={currentNumbers.get(result.field_key)}
-                    canReview={Boolean(refreshCard && card && fields)}
+                    canReview={Boolean(canReview && refreshCard && card && fields)}
                     decide={(decision, value) => review(file, result, decision, value)}
                   />
                 ))}

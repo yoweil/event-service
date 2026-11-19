@@ -158,11 +158,12 @@ func (a *api) insertType(ctx context.Context, input createTypeInput) (eventTypeR
 	if err != nil {
 		return result, err
 	}
+	who := requestActor(ctx)
 	err = a.db.QueryRowContext(ctx, `
-        SELECT id, code, name FROM public.create_event_type($1, $2, 'service', $3, $4,
-            ARRAY(SELECT f FROM json_populate_recordset(NULL::public.event_field_definition, $5::json) AS f),
-            ARRAY(SELECT o FROM json_populate_recordset(NULL::public.event_option_definition, $6::json) AS o))`,
-		input.Code, input.Name, a.actor, input.Description, fields, options).Scan(&result.ID, &result.Code, &result.Name)
+        SELECT id, code, name FROM public.create_event_type($1, $2, $3, $4, $5,
+            ARRAY(SELECT f FROM json_populate_recordset(NULL::public.event_field_definition, $6::json) AS f),
+            ARRAY(SELECT o FROM json_populate_recordset(NULL::public.event_option_definition, $7::json) AS o))`,
+		input.Code, input.Name, who.Kind, who.ID, input.Description, fields, options).Scan(&result.ID, &result.Code, &result.Name)
 	return result, err
 }
 
@@ -205,11 +206,12 @@ func (a *api) persistEvent(ctx context.Context, id *int64, input saveInput) (eve
 	if err != nil {
 		return result, err
 	}
+	who := requestActor(ctx)
 	err = a.db.QueryRowContext(ctx, `
-        SELECT id, revision FROM public.save_event_with_source($1, $2, $3, $4, $5, $6, coalesce($7,''), 'service', $8,
-            ARRAY(SELECT f FROM json_populate_recordset(NULL::public.event_field_edit, $9::json) AS f), $10, $11, $12)`,
+        SELECT id, revision FROM public.save_event_with_source($1, $2, $3, $4, $5, $6, coalesce($7,''), $8, $9,
+            ARRAY(SELECT f FROM json_populate_recordset(NULL::public.event_field_edit, $10::json) AS f), $11, $12, $13)`,
 		input.TypeID, input.WellID, input.Status, input.TimeKind, input.Start, input.End, input.Description,
-		a.actor, fields, id, input.ExpectedRevision, input.SourceNotificationID).Scan(&result.ID, &result.Revision)
+		who.Kind, who.ID, fields, id, input.ExpectedRevision, input.SourceNotificationID).Scan(&result.ID, &result.Revision)
 	return result, err
 }
 

@@ -1,24 +1,35 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
 )
 
+func resultActor(ctx context.Context) actor {
+	who := requestActor(ctx)
+	if who.shared {
+		who.ID = "attachment-processor"
+	}
+	return who
+}
+
 type attachmentResultInput struct {
-	Key   string       `json:"field_key"`
-	Unit  *string      `json:"unit_code"`
-	Value *json.Number `json:"value_number"`
-	Sheet *string      `json:"sheet_name"`
-	Cell  *string      `json:"cell_ref"`
-	Issue *string      `json:"issue"`
+	Key               string       `json:"field_key"`
+	Unit              *string      `json:"unit_code"`
+	Value             *json.Number `json:"value_number"`
+	Sheet             *string      `json:"sheet_name"`
+	Cell              *string      `json:"cell_ref"`
+	Issue             *string      `json:"issue"`
+	CalculationMethod *string      `json:"calculation_method"`
 }
 
 func (input attachmentResultInput) valid() bool {
 	return input.Key != "" &&
 		(input.Value != nil || input.Issue != nil) &&
 		(input.Issue == nil || strings.TrimSpace(*input.Issue) != "") &&
+		(input.CalculationMethod == nil || strings.TrimSpace(*input.CalculationMethod) != "") &&
 		(input.Value == nil || (input.Sheet != nil && input.Cell != nil &&
 			strings.TrimSpace(*input.Sheet) != "" && strings.TrimSpace(*input.Cell) != ""))
 }
@@ -44,8 +55,10 @@ func (a *api) recordAttachmentResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var result json.RawMessage
-	err := a.db.QueryRowContext(r.Context(), `SELECT row_to_json(r) FROM public.record_attachment_result($1,$2,$3,$4,$5,$6,$7,$8,$9) r`,
-		eventID, fileID, input.Notice, input.Key, input.Unit, input.Value, input.Sheet, input.Cell, input.Issue).Scan(&result)
+	who := resultActor(r.Context())
+	err := a.db.QueryRowContext(r.Context(), `SELECT row_to_json(r) FROM public.record_attachment_result($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) r`,
+		eventID, fileID, input.Notice, input.Key, input.Unit, input.Value, input.Sheet, input.Cell, input.Issue, input.CalculationMethod,
+		who.Kind, who.ID).Scan(&result)
 	if err != nil {
 		databaseError(w, err)
 		return
@@ -85,10 +98,11 @@ func (a *api) recordAttachmentResults(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var response json.RawMessage
+	who := resultActor(r.Context())
 	err = a.db.QueryRowContext(r.Context(), `
         SELECT array_to_json(public.record_attachment_results($1,$2,$3,
-            ARRAY(SELECT result FROM json_populate_recordset(NULL::public.attachment_result_input, $4::json) AS result)))`,
-		eventID, fileID, input.Notice, results).Scan(&response)
+            ARRAY(SELECT result FROM json_populate_recordset(NULL::public.attachment_result_input, $4::json) AS result),$5,$6))`,
+		eventID, fileID, input.Notice, results, who.Kind, who.ID).Scan(&response)
 	if err != nil {
 		databaseError(w, err)
 		return
@@ -97,6 +111,11 @@ func (a *api) recordAttachmentResults(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *api) reviewAttachmentResult(w http.ResponseWriter, r *http.Request) {
+	who := requestActor(r.Context())
+	if !who.canReview() {
+		respondError(w, http.StatusForbidden, "manual review requires a user token")
+		return
+	}
 	eventID, ok := pathID(w, r, "event")
 	if !ok {
 		return
@@ -124,7 +143,7 @@ func (a *api) reviewAttachmentResult(w http.ResponseWriter, r *http.Request) {
 	}
 	var result json.RawMessage
 	err := a.db.QueryRowContext(r.Context(), `SELECT row_to_json(r) FROM public.review_attachment_result($1,$2,$3,$4,$5,$6,$7) r`,
-		eventID, fileID, resultID, input.ExpectedRevision, input.Decision, input.Value, a.actor).Scan(&result)
+		eventID, fileID, resultID, input.ExpectedRevision, input.Decision, input.Value, who.ID).Scan(&result)
 	if err != nil {
 		databaseError(w, err)
 		return

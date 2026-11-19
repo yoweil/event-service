@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"strings"
 	"sync"
 	"time"
 )
@@ -21,9 +20,13 @@ func withWebUI(api http.Handler, dir string) http.Handler {
 }
 
 func run() error {
-	dsn, token := os.Getenv("DATABASE_URL"), os.Getenv("API_TOKEN")
-	if dsn == "" || strings.TrimSpace(token) == "" {
-		return errors.New("set DATABASE_URL and API_TOKEN")
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		return errors.New("set DATABASE_URL")
+	}
+	tokens, err := loadCredentials()
+	if err != nil {
+		return err
 	}
 	var hooks []*webhook
 	for _, queue := range []deliveryQueue{attachmentQueue, eventQueue} {
@@ -34,10 +37,6 @@ func run() error {
 		if hook != nil {
 			hooks = append(hooks, hook)
 		}
-	}
-	actor := strings.TrimSpace(os.Getenv("API_ACTOR_ID"))
-	if actor == "" {
-		actor = "local-client"
 	}
 	addr := os.Getenv("LISTEN_ADDR")
 	if addr == "" {
@@ -54,7 +53,7 @@ func run() error {
 		return err
 	}
 	server := http.Server{
-		Addr: addr, Handler: withWebUI(newHandler(db, token, actor, 25*time.Second), "web/dist"), ReadHeaderTimeout: 5 * time.Second,
+		Addr: addr, Handler: withWebUI(newHandler(db, tokens, 25*time.Second), "web/dist"), ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
 	}
 	listener, err := net.Listen("tcp", addr)

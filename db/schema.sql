@@ -218,6 +218,7 @@ CREATE TABLE public.event_attachments (
     size_bytes integer GENERATED ALWAYS AS (octet_length(content)) STORED,
     digest bytea GENERATED ALWAYS AS (sha256(content)) STORED,
     uploaded_by_id text NOT NULL CHECK (btrim(uploaded_by_id) <> ''),
+    uploaded_by_kind text CHECK (uploaded_by_kind IN ('user','service')),
     uploaded_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (event_id, filename, digest)
 );
@@ -312,6 +313,10 @@ CREATE TABLE public.attachment_results (
             AND CASE WHEN review_decision = 'reject' THEN reviewed_value_number IS NULL AND reviewed_revision IS NULL
                      ELSE reviewed_value_number IS NOT NULL AND reviewed_revision IS NOT NULL AND reviewed_revision > 0 END)
     ),
+    calculation_method text CHECK (calculation_method ~ '[^[:space:]]'),
+    submitted_by_kind text CHECK (submitted_by_kind IN ('user','service')),
+    submitted_by_id text CHECK (btrim(submitted_by_id) <> ''),
+    CONSTRAINT attachment_result_submitter_check CHECK ((submitted_by_kind IS NULL) = (submitted_by_id IS NULL)),
     UNIQUE (attachment_id, field_key),
     CHECK ((applied_revision IS NULL) = (reason IS NOT NULL)),
     CHECK (value_number IS NULL OR (sheet_name IS NOT NULL AND cell_ref IS NOT NULL))

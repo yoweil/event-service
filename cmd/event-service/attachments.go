@@ -80,13 +80,14 @@ func (a *api) uploadAttachment(w http.ResponseWriter, r *http.Request) {
 	}
 	var fileID int64
 	var metadata json.RawMessage
+	who := requestActor(r.Context())
 	err := a.db.QueryRowContext(r.Context(), `
   WITH saved AS (
-   INSERT INTO public.event_attachments AS a (event_id,filename,content,uploaded_by_id)
-   SELECT e.id,$2,$3,$4 FROM public.events e WHERE e.id=$1
+   INSERT INTO public.event_attachments AS a (event_id,filename,content,uploaded_by_id,uploaded_by_kind)
+   SELECT e.id,$2,$3,$4,$5 FROM public.events e WHERE e.id=$1
    ON CONFLICT (event_id,filename,digest) DO UPDATE SET filename=a.filename
-   RETURNING id,filename,size_bytes,encode(digest,'hex') AS sha256,uploaded_by_id,uploaded_at
-  ) SELECT id,row_to_json(saved) FROM saved`, eventID, name, data, a.actor).Scan(&fileID, &metadata)
+   RETURNING id,filename,size_bytes,encode(digest,'hex') AS sha256,uploaded_by_id,uploaded_by_kind,uploaded_at
+  ) SELECT id,row_to_json(saved) FROM saved`, eventID, name, data, who.ID, who.Kind).Scan(&fileID, &metadata)
 	if err != nil {
 		databaseError(w, err)
 		return
@@ -103,7 +104,7 @@ func (a *api) listAttachments(w http.ResponseWriter, r *http.Request) {
 	var files json.RawMessage
 	err := a.db.QueryRowContext(r.Context(), `
   SELECT coalesce((SELECT json_agg(file ORDER BY file.id DESC) FROM (
-   SELECT a.id,a.filename,a.size_bytes,encode(a.digest,'hex') AS sha256,a.uploaded_by_id,a.uploaded_at,
+   SELECT a.id,a.filename,a.size_bytes,encode(a.digest,'hex') AS sha256,a.uploaded_by_id,a.uploaded_by_kind,a.uploaded_at,
           coalesce((SELECT json_agg(r ORDER BY r.id) FROM public.attachment_results r
                     WHERE r.attachment_id=a.id),'[]'::json) AS results
    FROM public.event_attachments a WHERE a.event_id=e.id

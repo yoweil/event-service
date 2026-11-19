@@ -2,8 +2,9 @@ import { useState } from "react";
 import { Alert, Button, Empty, Input, PageHeader, Textarea, toast } from "@intetech/ui-kit";
 import { useResource } from "./api.js";
 import { Attachments } from "./attachments.jsx";
+import { EventHistory } from "./history.jsx";
 import { Busy, Choice, ExtraInput, Failure, kinds, option, StateBadge, statuses } from "./common.jsx";
-import { initialForm, payload, showTime, valueColumns } from "./model.js";
+import { initialForm, payload, showActor, showTime, valueColumns } from "./model.js";
 
 function displayField(f, row) {
   if (!row) return "—";
@@ -59,7 +60,7 @@ function Details({ card, definition }) {
         <h2>Сведения о записи</h2>
         <dl>
           <Datum label="Ревизия">{card.revision}</Datum>
-          <Datum label="Создал">{card.created_by_id}</Datum>
+          <Datum label="Создал">{showActor(card.created_by_kind, card.created_by_id)}</Datum>
           <Datum label="Создано">{showTime(card.created_at)}</Datum>
           <Datum label="Обновлено">{showTime(card.updated_at)}</Datum>
         </dl>
@@ -216,7 +217,7 @@ function Editor({ api, card, types, initialType, done, cancel, reload }) {
   );
 }
 
-export function EventCard({ api, types, id, initialType }) {
+export function EventCard({ api, types, id, initialType, canReview }) {
   const create = id === "new";
   const [editing, setEditing] = useState(create);
   const record = useResource(api, create ? null : "/events/" + id);
@@ -291,8 +292,12 @@ export function EventCard({ api, types, id, initialType }) {
           api={api}
           card={card}
           fields={definition.data?.fields}
+          canReview={canReview}
           refreshCard={editing ? undefined : record.retry}
         />
+      )}
+      {!editing && card && definition.data && (
+        <EventHistory key={card.revision} api={api} id={id} fields={definition.data.fields} />
       )}
     </>
   );

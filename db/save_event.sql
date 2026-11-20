@@ -230,15 +230,17 @@ BEGIN
     END IF;
     IF coalesce(cardinality(p_results), 0) = 0 OR EXISTS (
         SELECT FROM unnest(p_results) AS input
-        WHERE input.field_key IS NULL OR input.field_key COLLATE "C" !~ '^[a-z][a-z0-9_]{0,63}$'
+        WHERE input.field_key COLLATE "C" !~ '^[a-z][a-z0-9_]{0,63}$'
+           OR (input.field_key IS NULL AND num_nonnulls(input.value_number, input.unit_code,
+               input.sheet_name, input.cell_ref, input.calculation_method) <> 0)
            OR (input.value_number IS NULL AND input.issue IS NULL)
-           OR (input.issue IS NOT NULL AND btrim(input.issue) = '')
+           OR (input.issue IS NOT NULL AND input.issue !~ '[^[:space:]]')
            OR (input.value_number IS NOT NULL AND (
                coalesce(btrim(input.sheet_name), '') = '' OR coalesce(btrim(input.cell_ref), '') = ''
                OR input.value_number IN ('NaN','Infinity','-Infinity')
            ))
     ) THEN
-        RAISE EXCEPTION 'Expected a field key and either a sourced number or an issue for each result'
+        RAISE EXCEPTION 'Expected a field result or a file issue for each item'
             USING ERRCODE = '22023';
     END IF;
     IF EXISTS (SELECT FROM unnest(p_results) AS input GROUP BY input.field_key HAVING count(*) > 1) THEN
@@ -274,7 +276,7 @@ BEGIN
         LEFT JOIN public.event_type_fields f ON f.event_type_id = card.event_type_id AND f.field_key = input.field_key
         LEFT JOIN public.event_field_values v ON v.event_id = card.id AND v.field_key = input.field_key
         WHERE NOT EXISTS (
-            SELECT FROM public.attachment_results r WHERE r.attachment_id = p_attachment AND r.field_key = input.field_key
+            SELECT FROM public.attachment_results r WHERE r.attachment_id = p_attachment AND r.field_key IS NOT DISTINCT FROM input.field_key
         )
         ORDER BY input.ordinality
     );
@@ -304,7 +306,7 @@ BEGIN
     RETURN (
         SELECT array_agg(r ORDER BY input.ordinality)
         FROM unnest(p_results) WITH ORDINALITY AS input
-        JOIN public.attachment_results r ON r.attachment_id = p_attachment AND r.field_key = input.field_key
+        JOIN public.attachment_results r ON r.attachment_id = p_attachment AND r.field_key IS NOT DISTINCT FROM input.field_key
     );
 END;
 $$;
@@ -376,7 +378,10 @@ BEGIN
         RAISE EXCEPTION 'Event revision has changed' USING ERRCODE = 'EV409';
     END IF;
 
-    IF p_decision <> 'reject' THEN
+    IF proposal.field_key IS NULL AND p_decision = 'correct' THEN
+        RAISE EXCEPTION 'A file issue has no numeric value to correct' USING ERRCODE = '22023';
+    END IF;
+    IF proposal.field_key IS NOT NULL AND p_decision <> 'reject' THEN
         SELECT * INTO definition FROM public.event_type_fields
         WHERE event_type_id = card.event_type_id AND field_key = proposal.field_key;
         IF NOT FOUND OR definition.is_archived OR definition.data_type NOT IN ('integer','number') THEN

@@ -16,7 +16,7 @@ func resultActor(ctx context.Context) actor {
 }
 
 type attachmentResultInput struct {
-	Key               string       `json:"field_key"`
+	Key               *string      `json:"field_key"`
 	Unit              *string      `json:"unit_code"`
 	Value             *json.Number `json:"value_number"`
 	Sheet             *string      `json:"sheet_name"`
@@ -26,7 +26,11 @@ type attachmentResultInput struct {
 }
 
 func (input attachmentResultInput) valid() bool {
-	return input.Key != "" &&
+	if input.Key == nil {
+		return input.Issue != nil && strings.TrimSpace(*input.Issue) != "" &&
+			input.Value == nil && input.Unit == nil && input.Sheet == nil && input.Cell == nil && input.CalculationMethod == nil
+	}
+	return *input.Key != "" &&
 		(input.Value != nil || input.Issue != nil) &&
 		(input.Issue == nil || strings.TrimSpace(*input.Issue) != "") &&
 		(input.CalculationMethod == nil || strings.TrimSpace(*input.CalculationMethod) != "") &&
@@ -51,7 +55,7 @@ func (a *api) recordAttachmentResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if input.Notice == "" || !input.valid() {
-		respondError(w, 400, "expected notification_id, field_key and either a sourced numeric value or an issue")
+		respondError(w, 400, "expected notification_id and either a field result or a file issue")
 		return
 	}
 	var result json.RawMessage
@@ -88,7 +92,7 @@ func (a *api) recordAttachmentResults(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, result := range input.Results {
 		if !result.valid() {
-			respondError(w, http.StatusBadRequest, "expected field_key and either a sourced numeric value or an issue for each result")
+			respondError(w, http.StatusBadRequest, "expected a field result or a file issue for each item")
 			return
 		}
 	}

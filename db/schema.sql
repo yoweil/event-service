@@ -293,7 +293,7 @@ FOR EACH ROW EXECUTE FUNCTION public.capture_attachment_revision();
 CREATE TABLE public.attachment_results (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     attachment_id bigint NOT NULL REFERENCES public.event_attachments(id),
-    field_key text NOT NULL CHECK (field_key COLLATE "C" ~ '^[a-z][a-z0-9_]{0,63}$'),
+    field_key text CHECK (field_key COLLATE "C" ~ '^[a-z][a-z0-9_]{0,63}$'),
     unit_code text,
     value_number numeric CHECK (value_number NOT IN ('NaN','Infinity','-Infinity')),
     sheet_name text,
@@ -310,16 +310,26 @@ CREATE TABLE public.attachment_results (
         (review_decision IS NULL AND num_nonnulls(reviewed_by_id, reviewed_at, reviewed_value_number, reviewed_revision) = 0)
         OR (review_decision IS NOT NULL AND applied_revision IS NULL
             AND reviewed_by_id IS NOT NULL AND reviewed_at IS NOT NULL
-            AND CASE WHEN review_decision = 'reject' THEN reviewed_value_number IS NULL AND reviewed_revision IS NULL
+            AND CASE WHEN review_decision = 'reject' OR field_key IS NULL THEN reviewed_value_number IS NULL AND reviewed_revision IS NULL
                      ELSE reviewed_value_number IS NOT NULL AND reviewed_revision IS NOT NULL AND reviewed_revision > 0 END)
     ),
     calculation_method text CHECK (calculation_method ~ '[^[:space:]]'),
     submitted_by_kind text CHECK (submitted_by_kind IN ('user','service')),
     submitted_by_id text CHECK (btrim(submitted_by_id) <> ''),
     CONSTRAINT attachment_result_submitter_check CHECK ((submitted_by_kind IS NULL) = (submitted_by_id IS NULL)),
+    CONSTRAINT attachment_results_file_issue_check CHECK (
+        field_key IS NOT NULL OR (
+            reason IS NOT NULL AND reason ~ '[^[:space:]]'
+            AND num_nonnulls(unit_code, value_number, sheet_name, cell_ref, calculation_method, applied_revision) = 0
+            AND review_decision IS DISTINCT FROM 'correct'
+        )
+    ),
     UNIQUE (attachment_id, field_key),
     CHECK ((applied_revision IS NULL) = (reason IS NOT NULL)),
     CHECK (value_number IS NULL OR (sheet_name IS NOT NULL AND cell_ref IS NOT NULL))
 );
+
+CREATE UNIQUE INDEX attachment_results_one_file_issue ON public.attachment_results (attachment_id)
+    WHERE field_key IS NULL;
 
 COMMIT;

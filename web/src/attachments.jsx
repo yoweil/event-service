@@ -25,9 +25,11 @@ function FileResult({ result, field, currentValue, canReview, decide }) {
   const [correction, setCorrection] = useState(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+  const wholeFile = result.field_key == null;
   const pending = result.state === "review" && !result.review_decision;
   const numericField = field && !field.is_archived && ["integer", "number"].includes(field.data_type);
-  const canAccept = numericField && result.value_number != null && result.unit_code === field.unit_code;
+  const canAccept = wholeFile || (numericField && result.value_number != null && result.unit_code === field.unit_code);
+  const decisionLabel = wholeFile && result.review_decision === "accept" ? "Файл проверен" : reviewLabels[result.review_decision];
   const conflict = error?.status === 409;
 
   async function submit(decision) {
@@ -45,15 +47,16 @@ function FileResult({ result, field, currentValue, canReview, decide }) {
 
   return (
     <div className="file-result">
-      <strong>{reviewLabels[result.review_decision] ?? (pending ? "Требует проверки" : "Заполнено автоматически")}</strong>
-      <span>{field?.label ?? result.field_key}</span>
-      <span>Из файла · {shownNumber(result.value_number, result.unit_code)}</span>
+      <strong>{decisionLabel ?? (pending ? "Требует проверки" : "Заполнено автоматически")}</strong>
+      <span>{wholeFile ? "Вложение целиком" : field?.label ?? result.field_key}</span>
+      {!wholeFile && <span>Из файла · {shownNumber(result.value_number, result.unit_code)}</span>}
       {pending && numericField && <span>В карточке · {shownNumber(currentValue, field.unit_code)}</span>}
       {result.sheet_name && <span>Лист «{result.sheet_name}» · {result.cell_ref}</span>}
       {result.calculation_method && <span>Способ расчёта · {result.calculation_method}</span>}
       {result.submitted_by_id && <span>Источник · {showActor(result.submitted_by_kind, result.submitted_by_id)}</span>}
       {result.applied_revision && <span>Ревизия {result.applied_revision}</span>}
-      {pending && result.reason && <span>{result.reason}</span>}
+      {(pending || wholeFile) && result.reason && <span>{result.reason}</span>}
+      {wholeFile && pending && canReview && <span>Скачайте оригинал. Если нужно, внесите значения в карточку вручную.</span>}
       {result.review_decision && (
         <>
           {result.reviewed_value_number != null && (
@@ -97,7 +100,7 @@ function FileResult({ result, field, currentValue, canReview, decide }) {
             <div className="file-review-actions">
               {canAccept && (
                 <Button type="button" size="sm" disabled={saving || conflict} onClick={() => submit("accept")}>
-                  Принять
+                  {wholeFile ? "Отметить проверенным" : "Принять"}
                 </Button>
               )}
               {numericField && (
